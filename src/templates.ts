@@ -88,6 +88,12 @@ Keep the parent \`state: open\` until all checklist tasks and parent-level integ
 Verify only; do not edit application source, normative intent, or acceptance criteria. Compare original intent, contract, source, tests, and evidence. For decomposed work, assess every \`tasks.md\` checkbox, linked task outcome, dependency, and evidence before assessing parent integration and preservation boundaries. Trace every obligation into implementation and checks; scrutinize test oracles and integration boundaries.
 
 Run authorized checks, record pass/fail/blocked/untested evidence, and state the smallest next action. A parent remains open when a checkbox is unchecked, a linked task is invalid or unevidenced, the index and task files disagree, or parent integration evidence is missing. Mark verified only when all obligations have adequate current evidence.
+`,
+  archive: `# Archive
+
+Archive closes one explicitly selected, verified GDD change; it is a retention action, not a fourth implementation authority. Do not edit application source, tests, product configuration, requirements, or evidence. First read the selected \`gdd/changes/<slug>/change.md\` and run read-only \`gdd status\`. Archive only when that exact change is \`verified\`, all applicable tasks are complete with current evidence, and status reports no issue for the change.
+
+Explain that archival removes every GDD artifact for the selected change and retains only aggregate resolved-change and task totals. Require the user's explicit confirmation immediately before deletion. Then run \`gdd archive <slug> --yes\`; never manually delete the directory, infer a slug, use Archive for an open or invalid change, or archive as an automatic consequence of Check. Report the resulting aggregate totals and the next active change, if any.
 `
 };
 
@@ -96,7 +102,8 @@ const operationTitles: Record<Operation, string> = {
   design: 'Design',
   'design-update': 'Design Update',
   build: 'Build',
-  check: 'Check'
+  check: 'Check',
+  archive: 'Archive'
 };
 
 function frontmatter(name: string, description: string, version: string, agent = false): string {
@@ -119,13 +126,13 @@ export function renderHostFiles(host: Host, version: string): Record<string, str
   }
   const router = `# Route the request
 
-Classify without presenting a methodology menu: an explicit request to apply user feedback or revise a selected existing GDD change uses Design Update; new, planning-only, or exploratory requests use Design; verification-only requests use Check; delivery, modification, or resume requests use Build. Design Update is a Design specialization, not a new implementation authority. Ask only when intent is genuinely ambiguous. Apply the selected operation below in this conversation.
-\n${shared}\n${operations.design}\n${operations['design-update']}\n${operations.build}\n${operations.check}`;
+Classify without presenting a methodology menu: an explicit request to apply user feedback or revise a selected existing GDD change uses Design Update; new, planning-only, or exploratory requests use Design; verification-only requests use Check; delivery, modification, or resume requests use Build; an explicit request to close, archive, or prune a selected verified GDD change uses Archive. Design Update is a Design specialization, not a new implementation authority; Archive is an explicit retention action. Ask only when intent is genuinely ambiguous. Apply the selected operation below in this conversation.
+\n${shared}\n${operations.design}\n${operations['design-update']}\n${operations.build}\n${operations.check}\n${operations.archive}`;
   return {
     '.github/prompts/gdd.prompt.md':
       frontmatter(
         'gdd',
-        'Route a request to GDD Design, Design Update, Build, or Check.',
+        'Route a request to GDD Design, Design Update, Build, Check, or Archive.',
         version,
         true
       ) + router,
@@ -145,7 +152,7 @@ Classify without presenting a methodology menu: an explicit request to apply use
 
 export function baseFiles(version: string): Record<string, string> {
   return {
-    'gdd/README.md': `<!-- gdd: true -->\n# GDD\n\nGDD keeps compact durable records built on **Contract**, **Work**, and **Evidence**. Use generated prompts or skills: **Design** plans, **Design Update** revises an existing change from feedback without source edits, **Build** delivers, and **Check** verifies without source edits. Design Update is a Design specialization; Design, Build, and Check remain the three authority boundaries.\n\nTool-global files remain directly below \`gdd/\`. Each nontrivial change lives entirely below \`gdd/changes/<slug>/\`:\n\n- \`change.md\` — intent, contract, parent work coverage, integration evidence, and \`taskMode: decomposed\`.\n- \`plan.md\` — the task-mapped execution and verification plan.\n- \`tasks.md\` — the authoritative, nonempty Markdown checkbox index.\n- \`tasks/<stable-id>-<slug>.md\` — detailed task outcome, dependencies, check, evidence, and next action.\n\nExisting generated \`gdd-shape\` and \`gdd-work\` assets are retired and preserved for manual cleanup; use Design and Build for all new work.\n\nEvery new change uses \`taskMode: decomposed\`, including a one-action change. It requires a plan, a nonempty task index, and linked task records covering every implementation and verification action. Existing \`taskMode: direct\` records remain readable as legacy no-task-breakdown records; use Design Update to intentionally migrate one when it is revised or needs tasks. A checked task is valid only when its linked record has current evidence. A parent cannot be verified until every applicable task and parent-level acceptance are demonstrated.\n\nGenerated by GDD ${version}.\n`,
+    'gdd/README.md': `<!-- gdd: true -->\n# GDD\n\nGDD keeps compact durable records built on **Contract**, **Work**, and **Evidence**. Use generated prompts or skills: **Design** plans, **Design Update** revises an existing change from feedback without source edits, **Build** delivers, **Check** verifies without source edits, and **Archive** closes a confirmed verified record. Design Update is a Design specialization; Design, Build, and Check remain the three authority boundaries. Archive is an explicit retention action, never an automatic outcome of Check.\n\nTool-global files remain directly below \`gdd/\`. Each nontrivial change lives entirely below \`gdd/changes/<slug>/\`:\n\n- \`change.md\` — intent, contract, parent work coverage, integration evidence, and \`taskMode: decomposed\`.\n- \`plan.md\` — the task-mapped execution and verification plan.\n- \`tasks.md\` — the authoritative, nonempty Markdown checkbox index.\n- \`tasks/<stable-id>-<slug>.md\` — detailed task outcome, dependencies, check, evidence, and next action.\n\nExisting generated \`gdd-shape\` and \`gdd-work\` assets are retired and preserved for manual cleanup; use Design and Build for all new work.\n\nEvery new change uses \`taskMode: decomposed\`, including a one-action change. It requires a plan, a nonempty task index, and linked task records covering every implementation and verification action. Existing \`taskMode: direct\` records remain readable as legacy no-task-breakdown records; use Design Update to intentionally migrate one when it is revised or needs tasks. A checked task is valid only when its linked record has current evidence. A parent cannot be verified until every applicable task and parent-level acceptance are demonstrated.\n\nWhen a verified change is no longer needed in active status, confirm its removal and run \`gdd archive <slug>\`. Archive removes that change directory and retains only aggregate archived-change and archived-task totals in \`gdd/.gdd-archive.json\`; it never archives automatically or keeps a per-change history.\n\nGenerated by GDD ${version}.\n`,
     'gdd/templates/change.template.md': `---\ngdd: true\nid: <kebab-case-change-id>\ntitle: <concise outcome>\nstate: open\nupdated: <ISO-8601 UTC timestamp>\ntaskMode: decomposed\n# parent: <optional-parent-id>\n---\n\n# Intent\n\n## Contract\n\n## Decisions\n\n## Work\n\n## Evidence\n\n## Next\n\n<one next action or blocker>\n`,
     'gdd/templates/plan.template.md': `<!-- gdd: true -->\n# Plan: <outcome>\n\n## Prerequisites\n\n## Steps and checks\n\n1. T001 — <implementation or verification action and its check>\n\n## Risks and recovery\n`,
     'gdd/templates/tasks.template.md': `<!-- gdd: true -->\n# Tasks: <change outcome>\n\n<!-- Checkbox state is authoritative. Mark [x] only after the linked task has substantive evidence. -->\n\n## <task group>\n\n- [ ] T001 <concise outcome> — [details](tasks/T001-<slug>.md)\n`,

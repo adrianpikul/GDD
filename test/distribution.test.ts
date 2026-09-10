@@ -64,6 +64,7 @@ describe.sequential('built CLI distribution', () => {
     expect(help.stdout).toMatch(/\binit\b/);
     expect(help.stdout).toMatch(/\bupdate\b/);
     expect(help.stdout).toMatch(/\bstatus\b/);
+    expect(help.stdout).toMatch(/\barchive\b/);
   });
 
   it('packages and links the binary while retaining command workflows', async () => {
@@ -85,8 +86,35 @@ describe.sequential('built CLI distribution', () => {
     await run(process.execPath, [linkedBinary, 'init', project, '--agents']);
     await access(join(project, 'gdd/.gdd.json'));
     await run(process.execPath, [linkedBinary, 'update', project]);
+    const changeDirectory = join(project, 'gdd/changes/completed-change');
+    await mkdir(changeDirectory, { recursive: true });
+    await writeFile(
+      join(changeDirectory, 'change.md'),
+      '---\nid: completed-change\ntitle: Completed change\nstate: verified\nupdated: 2026-09-10T12:00:00Z\ntaskMode: direct\n---\n\n# Intent\n\n## Evidence\n\nIntegration check passed.\n\n## Next\n\nChange verified.\n'
+    );
+    const missingAcknowledgement = await run(
+      process.execPath,
+      [linkedBinary, 'archive', 'completed-change', project],
+      projectRoot,
+      process.env,
+      true
+    );
+    expect(missingAcknowledgement.exitCode).toBe(1);
+    expect(missingAcknowledgement.stderr).toContain('requires --yes');
+    const archived = await run(process.execPath, [
+      linkedBinary,
+      'archive',
+      'completed-change',
+      project,
+      '--yes'
+    ]);
+    expect(archived.stdout).toContain('Archived completed-change.');
     const status = await run(process.execPath, [linkedBinary, 'status', project, '--json']);
-    expect(JSON.parse(status.stdout)).toMatchObject({ records: [], invalid: [] });
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      records: [],
+      invalid: [],
+      archive: { changes: 1, tasks: 0 }
+    });
   });
 
   it('keeps human status streams readable and JSON isolated when records are invalid', async () => {

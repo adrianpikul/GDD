@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { GddError, init, isInside, readManifest, status, update } from '../src/core.js';
+import { archive, GddError, init, isInside, readManifest, status, update } from '../src/core.js';
 import { formatStatus, formatStatusIssues, shouldUseStatusColor } from '../src/status-view.js';
 import type { StatusResult } from '../src/types.js';
 
@@ -15,7 +15,8 @@ const operationPaths = {
     canonical: [
       '.agents/skills/gdd-design/SKILL.md',
       '.agents/skills/gdd-design-update/SKILL.md',
-      '.agents/skills/gdd-build/SKILL.md'
+      '.agents/skills/gdd-build/SKILL.md',
+      '.agents/skills/gdd-archive/SKILL.md'
     ]
   },
   github: {
@@ -23,7 +24,8 @@ const operationPaths = {
     canonical: [
       '.github/prompts/gdd-design.prompt.md',
       '.github/prompts/gdd-design-update.prompt.md',
-      '.github/prompts/gdd-build.prompt.md'
+      '.github/prompts/gdd-build.prompt.md',
+      '.github/prompts/gdd-archive.prompt.md'
     ]
   }
 } as const;
@@ -84,7 +86,7 @@ describe('GDD generation', () => {
   it('initializes both host integrations and persists a manifest', async () => {
     const root = await project();
     const actions = await init(root, ['agents', 'github'], false, '1.2.3');
-    expect(actions.filter((action) => action.status === 'created')).toHaveLength(14);
+    expect(actions.filter((action) => action.status === 'created')).toHaveLength(16);
     expect(await readManifest(root)).toMatchObject({
       generatorVersion: '1.2.3',
       hosts: ['agents', 'github']
@@ -94,6 +96,9 @@ describe('GDD generation', () => {
     );
     expect(await readFile(join(root, '.agents/skills/gdd-check/SKILL.md'), 'utf8')).toContain(
       '# Check'
+    );
+    expect(await readFile(join(root, '.agents/skills/gdd-archive/SKILL.md'), 'utf8')).toContain(
+      '# Archive'
     );
     expect(
       await readFile(join(root, '.agents/skills/gdd-design-update/SKILL.md'), 'utf8')
@@ -148,7 +153,8 @@ describe('GDD generation', () => {
       'feedback or revise a selected existing GDD change uses Design Update',
       'new, planning-only, or exploratory requests use Design',
       'verification-only requests use Check',
-      'delivery, modification, or resume requests use Build'
+      'delivery, modification, or resume requests use Build',
+      'close, archive, or prune a selected verified GDD change uses Archive'
     ]) {
       expect(router).toContain(route);
     }
@@ -166,6 +172,7 @@ describe('GDD generation', () => {
     expect(await readFile(join(root, 'gdd/README.md'), 'utf8')).toContain(
       'Every new change uses `taskMode: decomposed`, including a one-action change.'
     );
+    expect(await readFile(join(root, 'gdd/README.md'), 'utf8')).toContain('gdd archive <slug>');
     expect(await readFile(join(root, 'gdd/templates/change.template.md'), 'utf8')).toContain(
       'taskMode: decomposed'
     );
@@ -203,6 +210,29 @@ describe('GDD generation', () => {
         expect(content).toContain('gdd: true');
         expect(content).toContain('# Design Update');
         expect(content).toContain('Design Update is a specialization of Design');
+      }
+    }
+  });
+
+  it('creates the Archive asset with safety guidance for each selected host combination', async () => {
+    const scenarios: { hosts: OperationHost[]; paths: string[] }[] = [
+      { hosts: ['agents'], paths: ['.agents/skills/gdd-archive/SKILL.md'] },
+      { hosts: ['github'], paths: ['.github/prompts/gdd-archive.prompt.md'] },
+      {
+        hosts: ['agents', 'github'],
+        paths: ['.agents/skills/gdd-archive/SKILL.md', '.github/prompts/gdd-archive.prompt.md']
+      }
+    ];
+
+    for (const scenario of scenarios) {
+      const root = await project();
+      await init(root, scenario.hosts, false, '1.2.3');
+      for (const path of scenario.paths) {
+        const content = await readFile(join(root, path), 'utf8');
+        expect(content).toContain('gdd: true');
+        expect(content).toContain('# Archive');
+        expect(content).toContain("Require the user's explicit confirmation");
+        expect(content).toContain('never manually delete the directory');
       }
     }
   });
@@ -356,9 +386,12 @@ describe('status', () => {
     const root = await project();
     await init(root, ['agents'], false, '1.0.0');
     const templatePath = join(root, 'gdd/templates/tasks.template.md');
+    const archivePath = join(root, '.agents/skills/gdd-archive/SKILL.md');
     await rm(templatePath);
+    await rm(archivePath);
     await update(root, '2.0.0');
     expect(await readFile(templatePath, 'utf8')).toContain('Checkbox state is authoritative');
+    expect(await readFile(archivePath, 'utf8')).toContain('# Archive');
   });
 
   it('aggregates nested task records and leaves an active parent open', async () => {
@@ -697,6 +730,108 @@ describe('status', () => {
   });
 });
 
+describe('archive', () => {
+  it('removes a verified canonical change and retains aggregate-only totals', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    await writeCompleteIndexedChange(root, 'completed-change', 2);
+
+    const firstArchive = await archive(root, 'completed-change', true);
+
+    expect(firstArchive).toMatchObject({ changes: 1, tasks: 2 });
+    expect(firstArchive.lastArchivedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*\.\d{3}Z$/);
+    await expect(
+      readFile(join(root, 'gdd/changes/completed-change/change.md'), 'utf8')
+    ).rejects.toThrow();
+    const state = JSON.parse(await readFile(join(root, 'gdd/.gdd-archive.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(state).toMatchObject({ schemaVersion: 1, archivedChanges: 1, archivedTasks: 2 });
+    expect(JSON.stringify(state)).not.toContain('completed-change');
+    const stateText = await readFile(join(root, 'gdd/.gdd-archive.json'), 'utf8');
+    await update(root, '2.0.0');
+    expect(await readFile(join(root, 'gdd/.gdd-archive.json'), 'utf8')).toBe(stateText);
+
+    await writeIndexedChange(
+      root,
+      'legacy-verified',
+      'verified',
+      'integration test passed',
+      'direct'
+    );
+    const secondArchive = await archive(root, 'legacy-verified', true);
+
+    expect(secondArchive).toMatchObject({ changes: 2, tasks: 2 });
+    expect((await status(root)).records).toEqual([]);
+    expect((await status(root)).archive).toMatchObject({ changes: 2, tasks: 2 });
+  });
+
+  it('requires acknowledgement and refuses unknown, open, incomplete, and unsafe changes', async () => {
+    const root = await project();
+    const outside = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    await writeCompleteIndexedChange(root, 'confirmed-change', 1);
+    await writeIndexedChange(root, 'open-change', 'open', 'pending work', 'direct');
+    await writeIndexedChange(
+      root,
+      'incomplete-change',
+      'verified',
+      'integration test passed',
+      'decomposed'
+    );
+
+    await expect(archive(root, 'confirmed-change', false)).rejects.toThrow('explicit confirmation');
+    await expect(archive(root, 'missing-change', true)).rejects.toThrow('not found');
+    await expect(archive(root, 'open-change', true)).rejects.toThrow('Only verified changes');
+    await expect(archive(root, 'incomplete-change', true)).rejects.toThrow(
+      'complete and valid before archiving'
+    );
+    await expect(archive(root, '../outside', true)).rejects.toThrow('kebab-case');
+    await mkdir(join(outside, 'linked-change'), { recursive: true });
+    await writeFile(join(outside, 'linked-change/keep.md'), 'outside content');
+    await symlink(outside + '/linked-change', join(root, 'gdd/changes/linked-change'));
+    await expect(archive(root, 'linked-change', true)).rejects.toBeInstanceOf(GddError);
+
+    expect(await readFile(join(root, 'gdd/changes/confirmed-change/change.md'), 'utf8')).toContain(
+      'confirmed-change'
+    );
+    expect(await readFile(join(outside, 'linked-change/keep.md'), 'utf8')).toBe('outside content');
+    await rm(join(root, 'gdd/changes/linked-change'));
+    expect((await status(root)).archive).toEqual({ changes: 0, tasks: 0 });
+  });
+
+  it('recovers a staged archive exactly once and reports malformed aggregate state', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const staging = join(root, 'gdd/.gdd-archive-staging/recovered-change');
+    await mkdir(staging, { recursive: true });
+    await writeFile(join(staging, 'change.md'), 'archived staging data');
+    await writeFile(
+      join(root, 'gdd/.gdd-archive.pending.json'),
+      '{\n  "schemaVersion": 1,\n  "operationId": "recovery-test",\n  "slug": "recovered-change",\n  "tasks": 3,\n  "archivedAt": "2026-09-10T12:00:00.000Z"\n}\n'
+    );
+
+    await expect(archive(root, 'missing-change', true)).rejects.toThrow('not found');
+    expect((await status(root)).archive).toEqual({
+      changes: 1,
+      tasks: 3,
+      lastArchivedAt: '2026-09-10T12:00:00.000Z'
+    });
+    await expect(readFile(join(root, 'gdd/.gdd-archive.pending.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(staging, 'change.md'), 'utf8')).rejects.toThrow();
+
+    await writeFile(join(root, 'gdd/.gdd-archive.json'), '{ not JSON }\n');
+    const result = await status(root);
+    expect(result.archive).toEqual({ changes: 0, tasks: 0 });
+    expect(result.invalid).toContainEqual({
+      path: 'gdd/.gdd-archive.json',
+      error: 'Invalid archive state: gdd/.gdd-archive.json'
+    });
+    expect(await readFile(join(root, 'gdd/.gdd-archive.json'), 'utf8')).toBe('{ not JSON }\n');
+  });
+});
+
 describe('status presentation', () => {
   const result: StatusResult = {
     records: [
@@ -719,7 +854,8 @@ describe('status presentation', () => {
         tasks: { total: 0, open: 0, completed: 0, invalid: 0 }
       }
     ],
-    invalid: [{ path: 'gdd/changes/broken/change.md', error: 'missing YAML frontmatter' }]
+    invalid: [{ path: 'gdd/changes/broken/change.md', error: 'missing YAML frontmatter' }],
+    archive: { changes: 4, tasks: 11, lastArchivedAt: '2026-09-10T12:00:00.000Z' }
   };
 
   it('renders a readable, bounded plain status view and issues view', () => {
@@ -728,6 +864,7 @@ describe('status presentation', () => {
     expect(presentation.output).toBe(`GDD status
 ──────────
 2 changes · 1 open · 1 verified
+Archived  4 changes resolved · 11 tasks completed
 
 OPEN  Add red and orange application themes
       add-mint-orange-themes
@@ -758,13 +895,16 @@ VERIFIED  Update the README
           tasks: { total: 100, open: 50, completed: 50, invalid: 0 }
         }
       ],
-      invalid: []
+      invalid: [],
+      archive: { changes: 0, tasks: 0 }
     };
 
     expect(formatStatus(large).output).toContain('[█████░░░░░] 50 / 100 tasks complete');
-    expect(formatStatus({ records: [], invalid: [] }).output).toBe(`GDD status
+    expect(formatStatus({ records: [], invalid: [], archive: { changes: 0, tasks: 0 } }).output)
+      .toBe(`GDD status
 ──────────
 0 changes
+Archived  0 changes resolved · 0 tasks completed
 
 No GDD changes found.`);
   });
@@ -831,6 +971,22 @@ async function writeIndexedChange(
     join(directory, 'change.md'),
     `---\nid: ${slug}\ntitle: ${slug}\nstate: ${state}\nupdated: 2026-09-09T00:00:00Z${taskMode ? `\ntaskMode: ${taskMode}` : ''}\n---\n\n# Intent\n\n## Work\n\n[tasks](tasks.md)\n\n## Evidence\n\n${evidence}\n\n## Next\n\nContinue\n`
   );
+}
+
+async function writeCompleteIndexedChange(
+  root: string,
+  slug: string,
+  taskCount: number
+): Promise<void> {
+  await writeIndexedChange(root, slug, 'verified', 'integration test passed', 'decomposed');
+  const entries = Array.from({ length: taskCount }, (_, index) => {
+    const id = `T${String(index + 1).padStart(3, '0')}`;
+    return { id, completed: true, file: `${id}-work.md` };
+  });
+  for (const entry of entries) {
+    await writeIndexedTask(root, slug, entry.file, entry.id, [], `${entry.id} check passed`);
+  }
+  await writeTaskIndex(root, slug, entries);
 }
 
 async function writeIndexedTask(

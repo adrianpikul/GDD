@@ -1,8 +1,19 @@
-import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rmdir,
+  unlink,
+  writeFile
+} from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { baseFiles, isManagedContent, renderHostFiles } from './templates.js';
 import type {
+  ArchiveSummary,
   ChangeRecord,
   ChangeState,
   Host,
@@ -19,6 +30,9 @@ export type Action = {
   message?: string;
 };
 const manifestPath = 'gdd/.gdd.json';
+const archiveStatePath = 'gdd/.gdd-archive.json';
+const archiveJournalPath = 'gdd/.gdd-archive.pending.json';
+const archiveStagingPath = 'gdd/.gdd-archive-staging';
 const retiredOperationPaths = new Set([
   '.agents/skills/gdd-shape/SKILL.md',
   '.agents/skills/gdd-work/SKILL.md',
@@ -37,6 +51,27 @@ export function isInside(root: string, target: string): boolean {
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel));
 }
 
+const emptyArchiveSummary = (): ArchiveSummary => ({ changes: 0, tasks: 0 });
+
+type ArchiveState = {
+  schemaVersion: 1;
+  archivedChanges: number;
+  archivedTasks: number;
+  lastArchivedAt?: string;
+  pending?: {
+    operationId: string;
+    phase: 'prepared' | 'counted';
+  };
+};
+
+type ArchiveJournal = {
+  schemaVersion: 1;
+  operationId: string;
+  slug: string;
+  tasks: number;
+  archivedAt: string;
+};
+
 async function exists(path: string): Promise<boolean> {
   try {
     await lstat(path);
@@ -44,6 +79,15 @@ async function exists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function isMissing(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'ENOENT'
+  );
 }
 
 async function assertSafePath(root: string, relativePath: string): Promise<string> {
@@ -60,12 +104,371 @@ async function assertSafePath(root: string, relativePath: string): Promise<strin
   return target;
 }
 
+async function readOptionalFile(root: string, relativePath: string): Promise<string | undefined> {
+  const path = await assertSafePath(root, relativePath);
+  try {
+    const info = await lstat(path);
+    if (!info.isFile()) throw new GddError(`Expected a regular file: ${relativePath}`);
+    return await readFile(path, 'utf8');
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isIsoUtc(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    !Number.isNaN(new Date(value).getTime()) &&
+    new Date(value).toISOString() === value
+  );
+}
+
+function archiveSummary(state: ArchiveState | undefined): ArchiveSummary {
+  if (!state) return emptyArchiveSummary();
+  return {
+    changes: state.archivedChanges,
+    tasks: state.archivedTasks,
+    ...(state.lastArchivedAt ? { lastArchivedAt: state.lastArchivedAt } : {})
+  };
+}
+
+function parseArchiveState(text: string): ArchiveState {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new GddError(`Invalid archive state: ${archiveStatePath}`);
+  }
+  if (!value || typeof value !== 'object')
+    throw new GddError(`Invalid archive state: ${archiveStatePath}`);
+  const state = value as Record<string, unknown>;
+  if (
+    state.schemaVersion !== 1 ||
+    !isNonNegativeInteger(state.archivedChanges) ||
+    !isNonNegativeInteger(state.archivedTasks) ||
+    (state.lastArchivedAt !== undefined && !isIsoUtc(state.lastArchivedAt))
+  ) {
+    throw new GddError(`Invalid archive state: ${archiveStatePath}`);
+  }
+  let pending: ArchiveState['pending'];
+  if (state.pending !== undefined) {
+    const rawPending = state.pending as Record<string, unknown>;
+    if (
+      !rawPending ||
+      typeof rawPending.operationId !== 'string' ||
+      (rawPending.phase !== 'prepared' && rawPending.phase !== 'counted')
+    ) {
+      throw new GddError(`Invalid archive state: ${archiveStatePath}`);
+    }
+    pending = { operationId: rawPending.operationId, phase: rawPending.phase };
+  }
+  return {
+    schemaVersion: 1,
+    archivedChanges: state.archivedChanges,
+    archivedTasks: state.archivedTasks,
+    ...(typeof state.lastArchivedAt === 'string' ? { lastArchivedAt: state.lastArchivedAt } : {}),
+    ...(pending ? { pending } : {})
+  };
+}
+
+async function readArchiveState(root: string): Promise<ArchiveState | undefined> {
+  const text = await readOptionalFile(root, archiveStatePath);
+  return text === undefined ? undefined : parseArchiveState(text);
+}
+
+function parseArchiveJournal(text: string): ArchiveJournal {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new GddError(`Invalid archive recovery journal: ${archiveJournalPath}`);
+  }
+  if (!value || typeof value !== 'object') {
+    throw new GddError(`Invalid archive recovery journal: ${archiveJournalPath}`);
+  }
+  const journal = value as Record<string, unknown>;
+  if (
+    journal.schemaVersion !== 1 ||
+    typeof journal.operationId !== 'string' ||
+    !isArchiveSlug(journal.slug) ||
+    !isNonNegativeInteger(journal.tasks) ||
+    !isIsoUtc(journal.archivedAt)
+  ) {
+    throw new GddError(`Invalid archive recovery journal: ${archiveJournalPath}`);
+  }
+  return {
+    schemaVersion: 1,
+    operationId: journal.operationId,
+    slug: journal.slug,
+    tasks: journal.tasks,
+    archivedAt: journal.archivedAt
+  };
+}
+
+async function readArchiveJournal(root: string): Promise<ArchiveJournal | undefined> {
+  const text = await readOptionalFile(root, archiveJournalPath);
+  return text === undefined ? undefined : parseArchiveJournal(text);
+}
+
+async function writeJsonAtomically(
+  root: string,
+  relativePath: string,
+  value: unknown
+): Promise<void> {
+  const path = await assertSafePath(root, relativePath);
+  await mkdir(dirname(path), { recursive: true });
+  await assertSafePath(root, relativePath);
+  const temporaryRelativePath = `${relativePath}.${randomUUID()}.tmp`;
+  const temporaryPath = await assertSafePath(root, temporaryRelativePath);
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await rename(temporaryPath, path);
+  } catch (error) {
+    try {
+      const temporaryInfo = await lstat(temporaryPath);
+      if (temporaryInfo.isFile()) await unlink(temporaryPath);
+    } catch (cleanupError) {
+      if (!isMissing(cleanupError)) throw cleanupError;
+    }
+    throw error;
+  }
+}
+
+async function writeArchiveState(root: string, state: ArchiveState): Promise<void> {
+  await writeJsonAtomically(root, archiveStatePath, state);
+}
+
+async function writeArchiveJournal(root: string, journal: ArchiveJournal): Promise<void> {
+  await writeJsonAtomically(root, archiveJournalPath, journal);
+}
+
+async function removeRegularFile(
+  root: string,
+  relativePath: string,
+  missingIsOkay = false
+): Promise<void> {
+  const path = await assertSafePath(root, relativePath);
+  try {
+    const info = await lstat(path);
+    if (!info.isFile()) throw new GddError(`Expected a regular file: ${relativePath}`);
+    await unlink(path);
+  } catch (error) {
+    if (missingIsOkay && isMissing(error)) return;
+    throw error;
+  }
+}
+
+async function assertSafeDirectoryTree(root: string, path: string): Promise<void> {
+  if (!isInside(root, path)) throw new GddError(`Unsafe archive path: ${path}`);
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) throw new GddError(`Refusing symbolic-link path: ${path}`);
+  if (!info.isDirectory()) throw new GddError(`Expected a directory: ${path}`);
+  for (const child of await readdir(path, { withFileTypes: true })) {
+    const childPath = resolve(path, child.name);
+    if (!isInside(root, childPath)) throw new GddError(`Unsafe archive path: ${childPath}`);
+    const childInfo = await lstat(childPath);
+    if (childInfo.isSymbolicLink()) throw new GddError(`Refusing symbolic-link path: ${childPath}`);
+    if (childInfo.isDirectory()) await assertSafeDirectoryTree(root, childPath);
+    else if (!childInfo.isFile()) throw new GddError(`Unsupported archive entry: ${childPath}`);
+  }
+}
+
+async function removeSafeDirectoryTree(root: string, path: string): Promise<void> {
+  await assertSafeDirectoryTree(root, path);
+  for (const child of await readdir(path, { withFileTypes: true })) {
+    const childPath = resolve(path, child.name);
+    if (child.isDirectory()) await removeSafeDirectoryTree(root, childPath);
+    else await unlink(childPath);
+  }
+  await rmdir(path);
+}
+
+function isArchiveSlug(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(value);
+}
+
+function archiveChangePath(slug: string): string {
+  return `gdd/changes/${slug}`;
+}
+
+function archiveStagedPath(slug: string): string {
+  return `${archiveStagingPath}/${slug}`;
+}
+
 async function readText(path: string): Promise<string | undefined> {
   try {
     return await readFile(path, 'utf8');
   } catch {
     return undefined;
   }
+}
+
+function baseArchiveState(state: ArchiveState | undefined): ArchiveState {
+  return (
+    state ?? {
+      schemaVersion: 1,
+      archivedChanges: 0,
+      archivedTasks: 0
+    }
+  );
+}
+
+function completeArchiveState(state: ArchiveState): ArchiveState {
+  return {
+    schemaVersion: 1,
+    archivedChanges: state.archivedChanges,
+    archivedTasks: state.archivedTasks,
+    ...(state.lastArchivedAt ? { lastArchivedAt: state.lastArchivedAt } : {})
+  };
+}
+
+async function createArchiveStagingDirectory(root: string): Promise<void> {
+  const path = await assertSafePath(root, archiveStagingPath);
+  await mkdir(path, { recursive: true });
+  const info = await lstat(path);
+  if (info.isSymbolicLink())
+    throw new GddError(`Refusing symbolic-link path: ${archiveStagingPath}`);
+  if (!info.isDirectory()) throw new GddError(`Expected a directory: ${archiveStagingPath}`);
+}
+
+async function recoverArchive(root: string): Promise<void> {
+  const journal = await readArchiveJournal(root);
+  const state = await readArchiveState(root);
+  const stagingRoot = await assertSafePath(root, archiveStagingPath);
+  const stagingExists = await exists(stagingRoot);
+
+  if (!journal) {
+    if (state?.pending) {
+      throw new GddError('Archive recovery journal is missing for a pending archive operation.');
+    }
+    if (stagingExists) {
+      const entries = await readdir(stagingRoot);
+      if (entries.length)
+        throw new GddError('Archive recovery is required before starting another archive.');
+      await rmdir(stagingRoot);
+    }
+    return;
+  }
+
+  const sourceRelativePath = archiveChangePath(journal.slug);
+  const stagedRelativePath = archiveStagedPath(journal.slug);
+  const sourcePath = await assertSafePath(root, sourceRelativePath);
+  const stagedPath = await assertSafePath(root, stagedRelativePath);
+  const sourceExists = await exists(sourcePath);
+  const stagedExists = await exists(stagedPath);
+  if (state?.pending && state.pending.operationId !== journal.operationId) {
+    throw new GddError('Archive recovery journal does not match pending archive state.');
+  }
+  if (sourceExists && stagedExists) {
+    throw new GddError('Archive recovery found both source and staged change directories.');
+  }
+  if (sourceExists) {
+    if (state?.pending)
+      throw new GddError('Archive recovery found an unexpected pending archive state.');
+    await removeRegularFile(root, archiveJournalPath);
+    return;
+  }
+  if (!stagedExists) {
+    if (state?.pending?.phase === 'counted') {
+      await writeArchiveState(root, completeArchiveState(state));
+      await removeRegularFile(root, archiveJournalPath);
+      return;
+    }
+    if (!state?.pending) {
+      await removeRegularFile(root, archiveJournalPath);
+      return;
+    }
+    throw new GddError('Archive recovery cannot locate the staged change directory.');
+  }
+
+  await assertSafeDirectoryTree(root, stagedPath);
+  let currentState = baseArchiveState(state);
+  if (!currentState.pending) {
+    currentState = {
+      ...currentState,
+      pending: { operationId: journal.operationId, phase: 'prepared' }
+    };
+    await writeArchiveState(root, currentState);
+  }
+  if (currentState.pending?.phase === 'prepared') {
+    currentState = {
+      ...currentState,
+      archivedChanges: currentState.archivedChanges + 1,
+      archivedTasks: currentState.archivedTasks + journal.tasks,
+      lastArchivedAt: journal.archivedAt,
+      pending: { operationId: journal.operationId, phase: 'counted' }
+    };
+    await writeArchiveState(root, currentState);
+  }
+  await removeSafeDirectoryTree(root, stagedPath);
+  await writeArchiveState(root, completeArchiveState(currentState));
+  await removeRegularFile(root, archiveJournalPath);
+  if (await exists(stagingRoot)) {
+    const entries = await readdir(stagingRoot);
+    if (!entries.length) await rmdir(stagingRoot);
+  }
+}
+
+function issueBelongsToChange(issuePath: string, slug: string): boolean {
+  const directory = archiveChangePath(slug);
+  return issuePath === `${directory}/change.md` || issuePath.startsWith(`${directory}/`);
+}
+
+async function eligibleArchiveRecord(root: string, slug: string): Promise<ChangeRecord> {
+  const changePath = await assertSafePath(root, archiveChangePath(slug));
+  if (!(await exists(changePath))) throw new GddError(`GDD change not found: ${slug}`);
+  await assertSafeDirectoryTree(root, changePath);
+  const result = await status(root);
+  const record = result.records.find(
+    (candidate) => candidate.path === `${archiveChangePath(slug)}/change.md`
+  );
+  if (!record) throw new GddError(`GDD change not found: ${slug}`);
+  if (record.state !== 'verified')
+    throw new GddError(`Only verified changes can be archived: ${slug}`);
+  const issues = result.invalid.filter((issue) => issueBelongsToChange(issue.path, slug));
+  if (issues.length || record.tasks.open || record.tasks.invalid) {
+    throw new GddError(`GDD change must be complete and valid before archiving: ${slug}`);
+  }
+  return record;
+}
+
+export async function archive(
+  rootInput: string,
+  slug: string,
+  confirmed: boolean
+): Promise<ArchiveSummary> {
+  if (!confirmed) throw new GddError('Archiving requires explicit confirmation.');
+  if (!isArchiveSlug(slug)) throw new GddError('Archive slug must be a kebab-case change ID.');
+  const root = normalizeRoot(rootInput);
+  await recoverArchive(root);
+  const record = await eligibleArchiveRecord(root, slug);
+  const sourceRelativePath = archiveChangePath(slug);
+  const stagedRelativePath = archiveStagedPath(slug);
+  const sourcePath = await assertSafePath(root, sourceRelativePath);
+  await createArchiveStagingDirectory(root);
+  const stagedPath = await assertSafePath(root, stagedRelativePath);
+  if (await exists(stagedPath)) throw new GddError(`Archive staging already exists for: ${slug}`);
+  const journal: ArchiveJournal = {
+    schemaVersion: 1,
+    operationId: randomUUID(),
+    slug,
+    tasks: record.tasks.total,
+    archivedAt: now()
+  };
+  await writeArchiveJournal(root, journal);
+  try {
+    await rename(sourcePath, stagedPath);
+  } catch (error) {
+    await removeRegularFile(root, archiveJournalPath, true);
+    throw error;
+  }
+  await recoverArchive(root);
+  return archiveSummary(await readArchiveState(root));
 }
 
 export async function readManifest(root: string): Promise<Manifest | undefined> {
@@ -425,9 +828,28 @@ export async function status(rootInput: string, state?: ChangeState): Promise<St
   const manifest = await readManifest(root);
   if (!manifest) throw new GddError('Invalid or missing GDD manifest. Run gdd init first.');
   const gdd = await assertSafePath(root, 'gdd');
-  const paths = (await findMarkdownFiles(gdd)).filter((path) => basename(path) === 'change.md');
   const records: ChangeRecord[] = [];
   const invalid: { path: string; error: string }[] = [];
+  let archive = emptyArchiveSummary();
+  try {
+    const archiveState = await readArchiveState(root);
+    archive = archiveSummary(archiveState);
+    if (archiveState?.pending) {
+      invalid.push({
+        path: archiveStatePath,
+        error: 'archive recovery is required before the aggregate state is final'
+      });
+    }
+  } catch (error) {
+    invalid.push({
+      path: archiveStatePath,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+  const paths = (await findMarkdownFiles(gdd)).filter((path) => {
+    const firstSegment = relative(gdd, path).split(sep)[0];
+    return basename(path) === 'change.md' && firstSegment !== '.gdd-archive-staging';
+  });
   for (const path of paths) {
     const taskErrors = new Map<string, string[]>();
     const addTaskError = (taskPath: string, error: string): void => {
@@ -598,7 +1020,7 @@ export async function status(rootInput: string, state?: ChangeState): Promise<St
       });
     }
   }
-  return { records: records.sort((a, b) => b.updated.localeCompare(a.updated)), invalid };
+  return { records: records.sort((a, b) => b.updated.localeCompare(a.updated)), invalid, archive };
 }
 
 export function formatActions(actions: Action[]): string {

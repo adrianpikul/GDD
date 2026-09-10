@@ -1,7 +1,7 @@
-import { checkbox } from '@inquirer/prompts';
+import { checkbox, confirm } from '@inquirer/prompts';
 import { Command } from 'commander';
 import { createRequire } from 'node:module';
-import { init, update, status, formatActions, GddError } from './core.js';
+import { archive, init, update, status, formatActions, GddError } from './core.js';
 import { formatStatus, shouldUseStatusColor } from './status-view.js';
 import type { ChangeState, Host } from './types.js';
 
@@ -78,6 +78,29 @@ program
       if (presentation.issues) console.error(presentation.issues);
     }
     if (result.invalid.length) process.exitCode = 1;
+  });
+program
+  .command('archive <slug> [path]')
+  .description('Archive one verified GDD change and retain aggregate completion totals.')
+  .option('--yes', 'acknowledge irreversible deletion without an interactive prompt')
+  .action(async (slug: string, path = '.', flags: { yes?: boolean }) => {
+    if (!flags.yes) {
+      if (!process.stdin.isTTY) {
+        throw new GddError('Archiving requires --yes when not running interactively.');
+      }
+      const confirmed = await confirm({
+        message: `Archive verified change "${slug}"? Its GDD records will be removed.`,
+        default: false
+      });
+      if (!confirmed) {
+        console.log('Archive cancelled.');
+        return;
+      }
+    }
+    const totals = await archive(path, slug, true);
+    console.log(
+      `Archived ${slug}. Totals: ${totals.changes} archived change${totals.changes === 1 ? '' : 's'} · ${totals.tasks} archived task${totals.tasks === 1 ? '' : 's'}.`
+    );
   });
 
 program.parseAsync().catch((error: unknown) => {

@@ -7,6 +7,11 @@ export interface TaskSummary {
   completed: number;
   invalid: number;
 }
+export interface ArchiveSummary {
+  changes: number;
+  tasks: number;
+  lastArchivedAt?: string;
+}
 export interface Manifest {
   schemaVersion: 1;
   generatedBy: 'gdd';
@@ -34,6 +39,7 @@ export interface StatusIssue {
 export interface StatusResult {
   records: ChangeRecord[];
   invalid: StatusIssue[];
+  archive: ArchiveSummary;
 }
 export interface TaskRecord {
   path: string;

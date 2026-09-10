@@ -74,6 +74,10 @@ function summary(records: ChangeRecord[]): string {
   return counts.join(' · ');
 }
 
+function archiveSummary(result: StatusResult): string {
+  return `Archived  ${result.archive.changes} ${plural(result.archive.changes, 'change')} resolved · ${result.archive.tasks} ${plural(result.archive.tasks, 'task')} completed`;
+}
+
 export function formatStatusIssues(
   issues: StatusIssue[],
   options: StatusPresentationOptions = {}
@@ -98,7 +102,7 @@ export function formatStatus(
     ? result.records.map((record) => recordBlock(record, color)).join('\n\n')
     : 'No GDD changes found.';
   return {
-    output: `${heading}\n${divider}\n${summary(result.records)}\n\n${content}`,
+    output: `${heading}\n${divider}\n${summary(result.records)}\n${archiveSummary(result)}\n\n${content}`,
     issues: formatStatusIssues(result.invalid, options)
   };
 }
