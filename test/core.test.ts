@@ -115,6 +115,8 @@ describe('GDD generation', () => {
       'Require both feedback and a selected existing',
       'do not edit application source, tests, or product configuration',
       'Treat the feedback as current user intent',
+      'migrate it in place to `taskMode: decomposed`',
+      'leave newly created checkboxes unchecked until implementation evidence exists',
       'tasks.md` is the sole completion state',
       'Do not leave duplicate links, orphan task records',
       'uncheck only that affected task',
@@ -129,18 +131,18 @@ describe('GDD generation', () => {
     expect(await readFile(join(root, 'gdd/templates/tasks.template.md'), 'utf8')).toContain(
       'Checkbox state is authoritative'
     );
-    expect(await readFile(join(root, '.github/prompts/gdd-design.prompt.md'), 'utf8')).toContain(
-      'tasks/<stable-id>-<slug>.md'
-    );
-    expect(await readFile(join(root, '.github/prompts/gdd-design.prompt.md'), 'utf8')).toContain(
-      'Use this exact canonical wire format'
-    );
-    expect(await readFile(join(root, '.agents/skills/gdd-design/SKILL.md'), 'utf8')).toContain(
-      'id: T001'
-    );
-    expect(await readFile(join(root, '.agents/skills/gdd-design/SKILL.md'), 'utf8')).toContain(
-      'choose and write its `taskMode`'
-    );
+    for (const path of [
+      '.github/prompts/gdd-design.prompt.md',
+      '.agents/skills/gdd-design/SKILL.md'
+    ]) {
+      const design = await readFile(join(root, path), 'utf8');
+      expect(design).toContain('Every new change, including one with exactly one bounded');
+      expect(design).toContain('set `taskMode: decomposed`');
+      expect(design).toContain('tasks/<stable-id>-<slug>.md');
+      expect(design).toContain('Use this exact canonical wire format');
+      expect(design).toContain('id: T001');
+      expect(design).not.toContain('use `direct` only');
+    }
     const router = await readFile(join(root, '.github/prompts/gdd.prompt.md'), 'utf8');
     for (const route of [
       'feedback or revise a selected existing GDD change uses Design Update',
@@ -161,8 +163,14 @@ describe('GDD generation', () => {
       'three authority boundaries'
     );
     expect(await readFile(join(root, 'gdd/README.md'), 'utf8')).toContain('**Work**');
+    expect(await readFile(join(root, 'gdd/README.md'), 'utf8')).toContain(
+      'Every new change uses `taskMode: decomposed`, including a one-action change.'
+    );
     expect(await readFile(join(root, 'gdd/templates/change.template.md'), 'utf8')).toContain(
       'taskMode: decomposed'
+    );
+    expect(await readFile(join(root, 'gdd/templates/change.template.md'), 'utf8')).not.toContain(
+      'direct'
     );
     expect(await readFile(join(root, 'gdd/templates/plan.template.md'), 'utf8')).toContain(
       '1. T001'
@@ -667,11 +675,25 @@ describe('status', () => {
       taskMode: 'decomposed',
       tasks: { total: 5, completed: 0, open: 5, invalid: 0 }
     });
-    expect(records.get('direct-change')).toMatchObject({ taskMode: 'direct' });
+    expect(records.get('direct-change')).toMatchObject({
+      taskMode: 'direct',
+      tasks: { total: 0, completed: 0, open: 0, invalid: 0 }
+    });
     expect(records.get('legacy-plan')).not.toHaveProperty('taskMode');
     expect(errors).toContain('decomposed change requires a readable nonempty tasks.md');
     expect(errors).toContain('direct change cannot include plan.md; use taskMode: decomposed');
     expect(errors).toContain('taskMode must be decomposed or direct when present');
+
+    const directPath = join(root, 'gdd/changes/direct-change/change.md');
+    const directBefore = await readFile(directPath, 'utf8');
+    await update(root, '2.0.0');
+    expect(await readFile(directPath, 'utf8')).toBe(directBefore);
+    const afterUpdate = await status(root);
+    expect(afterUpdate.records.find((record) => record.id === 'direct-change')).toMatchObject({
+      taskMode: 'direct',
+      tasks: { total: 0, completed: 0, open: 0, invalid: 0 }
+    });
+    expect(formatStatus(afterUpdate).output).toContain('Progress  — no task breakdown');
   });
 });
 
