@@ -15,6 +15,26 @@ import {
 
 const roots: string[] = [];
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
+const operationPaths = {
+  agents: {
+    legacy: ['.agents/skills/gdd-shape/SKILL.md', '.agents/skills/gdd-work/SKILL.md'],
+    canonical: [
+      '.agents/skills/gdd-design/SKILL.md',
+      '.agents/skills/gdd-design-update/SKILL.md',
+      '.agents/skills/gdd-build/SKILL.md'
+    ]
+  },
+  github: {
+    legacy: ['.github/prompts/gdd-shape.prompt.md', '.github/prompts/gdd-work.prompt.md'],
+    canonical: [
+      '.github/prompts/gdd-design.prompt.md',
+      '.github/prompts/gdd-design-update.prompt.md',
+      '.github/prompts/gdd-build.prompt.md'
+    ]
+  }
+} as const;
+type OperationHost = keyof typeof operationPaths;
+
 async function project(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gdd-test-'));
   roots.push(root);
@@ -24,39 +44,129 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+function pathsFor(hosts: OperationHost[], kind: 'legacy' | 'canonical'): string[] {
+  return hosts.flatMap((host) => operationPaths[host][kind]);
+}
+
+async function seedLegacyInstallation(
+  root: string,
+  hosts: OperationHost[]
+): Promise<Map<string, string>> {
+  await init(root, hosts, false, '1.0.0');
+  await Promise.all(
+    pathsFor(hosts, 'canonical').map((path) => rm(join(root, path), { force: true }))
+  );
+
+  const legacyContents = new Map<string, string>();
+  for (const path of pathsFor(hosts, 'legacy')) {
+    const content = `<!-- gdd: true -->\nlegacy ${path}\n`;
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), content);
+    legacyContents.set(path, content);
+  }
+
+  const manifest = await readManifest(root);
+  if (!manifest) throw new Error('Expected a generated manifest');
+  await writeFile(
+    join(root, 'gdd/.gdd.json'),
+    `${JSON.stringify(
+      {
+        ...manifest,
+        managedPaths: [
+          ...new Set([
+            ...manifest.managedPaths.filter((path) => !pathsFor(hosts, 'canonical').includes(path)),
+            ...legacyContents.keys()
+          ])
+        ].sort()
+      },
+      null,
+      2
+    )}\n`
+  );
+  return legacyContents;
+}
+
 describe('GDD generation', () => {
   it('initializes both host integrations and persists a manifest', async () => {
     const root = await project();
     const actions = await init(root, ['agents', 'github'], false, '1.2.3');
-    expect(actions.filter((action) => action.status === 'created')).toHaveLength(12);
+    expect(actions.filter((action) => action.status === 'created')).toHaveLength(14);
     expect(await readManifest(root)).toMatchObject({
       generatorVersion: '1.2.3',
       hosts: ['agents', 'github']
     });
-    expect(await readFile(join(root, '.github/prompts/gdd-work.prompt.md'), 'utf8')).toContain(
-      'gdd: true'
+    expect(await readFile(join(root, '.github/prompts/gdd-build.prompt.md'), 'utf8')).toContain(
+      'name: gdd-build'
     );
     expect(await readFile(join(root, '.agents/skills/gdd-check/SKILL.md'), 'utf8')).toContain(
       '# Check'
     );
+    expect(
+      await readFile(join(root, '.agents/skills/gdd-design-update/SKILL.md'), 'utf8')
+    ).toContain('name: gdd-design-update');
+    expect(
+      await readFile(join(root, '.agents/skills/gdd-design-update/SKILL.md'), 'utf8')
+    ).toContain('gddVersion: "1.2.3"');
+    expect(
+      await readFile(join(root, '.github/prompts/gdd-design-update.prompt.md'), 'utf8')
+    ).toContain('name: gdd-design-update');
+    expect(
+      await readFile(join(root, '.github/prompts/gdd-design-update.prompt.md'), 'utf8')
+    ).toContain("agent: 'agent'");
+    const designUpdatePrompt = await readFile(
+      join(root, '.github/prompts/gdd-design-update.prompt.md'),
+      'utf8'
+    );
+    for (const boundary of [
+      'Require both feedback and a selected existing',
+      'do not edit application source, tests, or product configuration',
+      'Treat the feedback as current user intent',
+      'tasks.md` is the sole completion state',
+      'Do not leave duplicate links, orphan task records',
+      'uncheck only that affected task',
+      'Run read-only `gdd status` when available',
+      'Do not implement, repair source, weaken acceptance'
+    ]) {
+      expect(designUpdatePrompt).toContain(boundary);
+    }
     expect(await readFile(join(root, 'gdd/templates/task.template.md'), 'utf8')).toContain(
       'dependsOn: []'
     );
     expect(await readFile(join(root, 'gdd/templates/tasks.template.md'), 'utf8')).toContain(
       'Checkbox state is authoritative'
     );
-    expect(await readFile(join(root, '.github/prompts/gdd-shape.prompt.md'), 'utf8')).toContain(
+    expect(await readFile(join(root, '.github/prompts/gdd-design.prompt.md'), 'utf8')).toContain(
       'tasks/<stable-id>-<slug>.md'
     );
-    expect(await readFile(join(root, '.github/prompts/gdd-shape.prompt.md'), 'utf8')).toContain(
+    expect(await readFile(join(root, '.github/prompts/gdd-design.prompt.md'), 'utf8')).toContain(
       'Use this exact canonical wire format'
     );
-    expect(await readFile(join(root, '.agents/skills/gdd-shape/SKILL.md'), 'utf8')).toContain(
+    expect(await readFile(join(root, '.agents/skills/gdd-design/SKILL.md'), 'utf8')).toContain(
       'id: T001'
     );
-    expect(await readFile(join(root, '.agents/skills/gdd-shape/SKILL.md'), 'utf8')).toContain(
+    expect(await readFile(join(root, '.agents/skills/gdd-design/SKILL.md'), 'utf8')).toContain(
       'choose and write its `taskMode`'
     );
+    const router = await readFile(join(root, '.github/prompts/gdd.prompt.md'), 'utf8');
+    for (const route of [
+      'feedback or revise a selected existing GDD change uses Design Update',
+      'new, planning-only, or exploratory requests use Design',
+      'verification-only requests use Check',
+      'delivery, modification, or resume requests use Build'
+    ]) {
+      expect(router).toContain(route);
+    }
+    await expect(
+      readFile(join(root, '.github/prompts/gdd-shape.prompt.md'), 'utf8')
+    ).rejects.toThrow();
+    await expect(
+      readFile(join(root, '.agents/skills/gdd-work/SKILL.md'), 'utf8')
+    ).rejects.toThrow();
+    expect(await readFile(join(root, 'gdd/README.md'), 'utf8')).toContain('**Design Update**');
+    expect(await readFile(join(root, 'gdd/README.md'), 'utf8')).toContain(
+      'three authority boundaries'
+    );
+    expect(await readFile(join(root, 'gdd/README.md'), 'utf8')).toContain('**Work**');
     expect(await readFile(join(root, 'gdd/templates/change.template.md'), 'utf8')).toContain(
       'taskMode: decomposed'
     );
@@ -70,15 +180,40 @@ describe('GDD generation', () => {
     ).toBe(true);
   });
 
+  it('creates the Design Update asset for each selected host combination', async () => {
+    const scenarios: { hosts: OperationHost[]; paths: string[] }[] = [
+      { hosts: ['agents'], paths: ['.agents/skills/gdd-design-update/SKILL.md'] },
+      { hosts: ['github'], paths: ['.github/prompts/gdd-design-update.prompt.md'] },
+      {
+        hosts: ['agents', 'github'],
+        paths: [
+          '.agents/skills/gdd-design-update/SKILL.md',
+          '.github/prompts/gdd-design-update.prompt.md'
+        ]
+      }
+    ];
+
+    for (const scenario of scenarios) {
+      const root = await project();
+      await init(root, scenario.hosts, false, '1.2.3');
+      for (const path of scenario.paths) {
+        const content = await readFile(join(root, path), 'utf8');
+        expect(content).toContain('gdd: true');
+        expect(content).toContain('# Design Update');
+        expect(content).toContain('Design Update is a specialization of Design');
+      }
+    }
+  });
+
   it('refuses unmanaged collisions even with force', async () => {
     const root = await project();
     await mkdir(join(root, '.github/prompts'), { recursive: true });
-    await writeFile(join(root, '.github/prompts/gdd-work.prompt.md'), 'user content');
+    await writeFile(join(root, '.github/prompts/gdd-build.prompt.md'), 'user content');
     const actions = await init(root, ['github'], true, '1.0.0');
-    expect(actions.find((action) => action.path.endsWith('gdd-work.prompt.md'))).toMatchObject({
+    expect(actions.find((action) => action.path.endsWith('gdd-build.prompt.md'))).toMatchObject({
       status: 'refused'
     });
-    expect(await readFile(join(root, '.github/prompts/gdd-work.prompt.md'), 'utf8')).toBe(
+    expect(await readFile(join(root, '.github/prompts/gdd-build.prompt.md'), 'utf8')).toBe(
       'user content'
     );
   });
@@ -86,16 +221,16 @@ describe('GDD generation', () => {
   it('refreshes differing owned content only with force', async () => {
     const root = await project();
     await init(root, ['agents'], false, '1.0.0');
-    const path = join(root, '.agents/skills/gdd-work/SKILL.md');
+    const path = join(root, '.agents/skills/gdd-build/SKILL.md');
     await writeFile(path, '---\ngdd: true\n---\nold');
     expect(
       (await init(root, ['agents'], false, '1.0.0')).find((action) =>
-        action.path.endsWith('gdd-work/SKILL.md')
+        action.path.endsWith('gdd-build/SKILL.md')
       )
     ).toMatchObject({ status: 'unchanged' });
     expect(
       (await init(root, ['agents'], true, '1.0.0')).find((action) =>
-        action.path.endsWith('gdd-work/SKILL.md')
+        action.path.endsWith('gdd-build/SKILL.md')
       )
     ).toMatchObject({ status: 'updated' });
   });
@@ -113,6 +248,81 @@ describe('GDD generation', () => {
     await mkdir(join(root, '.agents'), { recursive: true });
     await symlink(outside, join(root, '.agents/skills'));
     await expect(init(root, ['agents'], false, '1.0.0')).rejects.toBeInstanceOf(GddError);
+  });
+
+  it('migrates legacy operation assets during update without changing their contents', async () => {
+    const root = await project();
+    const hosts: OperationHost[] = ['agents', 'github'];
+    const legacyContents = await seedLegacyInstallation(root, hosts);
+
+    const actions = await update(root, '2.0.0');
+
+    for (const path of pathsFor(hosts, 'canonical')) {
+      expect(actions.find((action) => action.path === path)).toMatchObject({ status: 'created' });
+      expect(await readFile(join(root, path), 'utf8')).toContain('gdd: true');
+    }
+    for (const [path, content] of legacyContents) {
+      expect(await readFile(join(root, path), 'utf8')).toBe(content);
+    }
+    const manifest = await readManifest(root);
+    expect(manifest?.managedPaths).toEqual(expect.not.arrayContaining(pathsFor(hosts, 'legacy')));
+    expect(manifest?.managedPaths).toEqual(expect.arrayContaining(pathsFor(hosts, 'canonical')));
+    expect(
+      (await update(root, '2.0.0')).some((action) =>
+        pathsFor(hosts, 'legacy').includes(action.path)
+      )
+    ).toBe(false);
+  });
+
+  it('retires legacy operation paths during forced initialization', async () => {
+    const root = await project();
+    const legacyContents = await seedLegacyInstallation(root, ['agents']);
+
+    const actions = await init(root, ['agents'], true, '2.0.0');
+
+    expect(
+      actions.find((action) => action.path === '.agents/skills/gdd-design/SKILL.md')
+    ).toMatchObject({ status: 'created' });
+    for (const [path, content] of legacyContents) {
+      expect(await readFile(join(root, path), 'utf8')).toBe(content);
+    }
+    expect((await readManifest(root))?.managedPaths).toEqual(
+      expect.not.arrayContaining(pathsFor(['agents'], 'legacy'))
+    );
+  });
+
+  it('refuses an unmanaged canonical collision without touching legacy assets', async () => {
+    const root = await project();
+    const legacyContents = await seedLegacyInstallation(root, ['agents']);
+    const destination = join(root, '.agents/skills/gdd-design/SKILL.md');
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, 'user content');
+
+    const actions = await update(root, '2.0.0');
+
+    expect(
+      actions.find((action) => action.path === '.agents/skills/gdd-design/SKILL.md')
+    ).toMatchObject({ status: 'refused' });
+    expect(await readFile(destination, 'utf8')).toBe('user content');
+    for (const [path, content] of legacyContents) {
+      expect(await readFile(join(root, path), 'utf8')).toBe(content);
+    }
+  });
+
+  it('refuses a user-owned Design Update path during update', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const destination = join(root, '.agents/skills/gdd-design-update/SKILL.md');
+    await writeFile(destination, 'user content');
+
+    const actions = await update(root, '2.0.0');
+
+    expect(
+      actions.find((action) => action.path === '.agents/skills/gdd-design-update/SKILL.md')
+    ).toMatchObject({
+      status: 'refused'
+    });
+    expect(await readFile(destination, 'utf8')).toBe('user content');
   });
 });
 

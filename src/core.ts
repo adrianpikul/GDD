@@ -11,6 +11,12 @@ export type Action = {
   message?: string;
 };
 const manifestPath = 'gdd/.gdd.json';
+const retiredOperationPaths = new Set([
+  '.agents/skills/gdd-shape/SKILL.md',
+  '.agents/skills/gdd-work/SKILL.md',
+  '.github/prompts/gdd-shape.prompt.md',
+  '.github/prompts/gdd-work.prompt.md'
+]);
 
 export function now(): string {
   return new Date().toISOString();
@@ -81,6 +87,16 @@ function filesFor(hosts: Host[], version: string): Record<string, string> {
   };
 }
 
+function managedPathsFor(previousPaths: string[], files: Record<string, string>): string[] {
+  return [
+    ...new Set([
+      ...previousPaths.filter((path) => !retiredOperationPaths.has(path)),
+      ...Object.keys(files),
+      manifestPath
+    ])
+  ].sort();
+}
+
 async function writeManaged(
   root: string,
   files: Record<string, string>,
@@ -136,9 +152,7 @@ export async function init(
   const files = filesFor(selected, version);
   const actions = await writeManaged(root, files, force);
   const timestamp = now();
-  const managedPaths = [
-    ...new Set([...(prior?.managedPaths ?? []), ...Object.keys(files), manifestPath])
-  ].sort();
+  const managedPaths = managedPathsFor(prior?.managedPaths ?? [], files);
   await writeManifest(root, {
     schemaVersion: 1,
     generatedBy: 'gdd',
@@ -160,9 +174,7 @@ export async function update(rootInput: string, version: string): Promise<Action
   await writeManifest(root, {
     ...manifest,
     generatorVersion: version,
-    managedPaths: [
-      ...new Set([...manifest.managedPaths, ...Object.keys(files), manifestPath])
-    ].sort(),
+    managedPaths: managedPathsFor(manifest.managedPaths, files),
     updatedAt: now()
   });
   return actions;

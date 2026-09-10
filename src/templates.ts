@@ -12,11 +12,11 @@ Use \`gdd/changes/<slug>/change.md\` for nontrivial work. New records declare \`
 `;
 
 const operations = {
-  shape: `# Shape
+  design: `# Design
 
 Plan only; do not edit application source. Establish outcome, boundaries, current behavior, and consequential unknowns. Inspect relevant code before questions. Write concise requirements with acceptance examples and preservation/failure behavior. Record consequential decisions and assumptions. Plan the smallest feasible next slice with a check for every action.
 
-Before writing \`change.md\`, choose and write its \`taskMode\`: use \`direct\` only for exactly one bounded, independently verifiable action with no \`plan.md\`; use \`decomposed\` for every detailed plan, every change with more than one implementation or verification action, and any work needing independent resumption or ownership. For decomposed work, you MUST create \`gdd/changes/<slug>/tasks.md\` and one \`tasks/<stable-id>-<slug>.md\` record per checkbox before finishing Shape. Use this exact canonical wire format; do not substitute a prose-only checklist, omit frontmatter, or add a task-level state:
+Before writing \`change.md\`, choose and write its \`taskMode\`: use \`direct\` only for exactly one bounded, independently verifiable action with no \`plan.md\`; use \`decomposed\` for every detailed plan, every change with more than one implementation or verification action, and any work needing independent resumption or ownership. For decomposed work, you MUST create \`gdd/changes/<slug>/tasks.md\` and one \`tasks/<stable-id>-<slug>.md\` record per checkbox before finishing Design. Use this exact canonical wire format; do not substitute a prose-only checklist, omit frontmatter, or add a task-level state:
 
 \`\`\`md
 <!-- gdd: true -->
@@ -55,11 +55,31 @@ dependsOn: []
 <one next action or blocker>
 \`\`\`
 
-The checkbox index is the sole completion state: link each task, leave it unchecked initially, and change it to \`[x]\` only after the linked evidence is current. Task files hold concrete outcome, acceptance/check, dependency list, evidence, and next action. In a decomposed \`plan.md\`, start every execution action with its task ID (for example, \`1. T001 — <action and check>\`) and map every implementation and verification action to one or more task IDs; do not leave untracked plan steps or purposeless task records. Before reporting Shape ready, verify \`change.md\` declares \`taskMode: decomposed\`, \`tasks.md\` is nonempty, every linked task record exists below the same change directory, and every checkbox is unchecked with honest initial evidence. Review all records for omissions, contradictions, dependencies, and vague outcomes. Stop at a reviewable plan or consequential unresolved choice.
+The checkbox index is the sole completion state: link each task, leave it unchecked initially, and change it to \`[x]\` only after the linked evidence is current. Task files hold concrete outcome, acceptance/check, dependency list, evidence, and next action. In a decomposed \`plan.md\`, start every execution action with its task ID (for example, \`1. T001 — <action and check>\`) and map every implementation and verification action to one or more task IDs; do not leave untracked plan steps or purposeless task records. Before reporting Design ready, verify \`change.md\` declares \`taskMode: decomposed\`, \`tasks.md\` is nonempty, every linked task record exists below the same change directory, and every checkbox is unchecked with honest initial evidence. Review all records for omissions, contradictions, dependencies, and vague outcomes. Stop at a reviewable plan or consequential unresolved choice.
 `,
-  work: `# Work
+  'design-update': `# Design Update
 
-Deliver the authorized outcome. Reconcile record, source, tests, and existing changes first. Shape only as needed for safety. For a decomposed change, select the smallest unchecked task whose linked dependencies are complete; implement its outcome using project patterns and avoid speculative cleanup. Run and read its acceptance check, record actual task evidence, update its timestamp, and then change only that linked \`tasks.md\` checkbox to \`[x]\`.
+Design Update is a specialization of Design, not a fourth authority boundary. Revise an existing GDD change from explicit user feedback; plan only and do not edit application source, tests, or product configuration.
+
+Require both feedback and a selected existing \`gdd/changes/<slug>/change.md\`. Resolve the change from an explicit reference or unambiguous context; if multiple unrelated changes remain, ask one decision-focused selection question. Read the feedback, \`change.md\`, \`plan.md\` when present, \`tasks.md\`, every linked task record, applicable project instructions, and only the focused source/tests needed to understand the changed behavior. Do not claim a check was run or an observation was made when it was not.
+
+Treat the feedback as current user intent within applicable project constraints. Preserve the change ID, title unless feedback changes it, parent relation, YAML frontmatter, and required \`## Next\`. First revise the affected Intent, Contract, and consequential Decisions; then identify the smallest affected Work, interfaces, dependencies, and Evidence. Preserve unrelated requirements, tasks, and still-applicable evidence. Do not erase useful historical observations: when evidence is no longer current, retain the factual observation and state why feedback made it insufficient for the revised outcome.
+
+For a \`taskMode: direct\` change, keep the compact record only while the revision remains exactly one bounded, independently verifiable action with no plan. Before a revision needs a detailed plan or more than one implementation or verification action, change it to \`taskMode: decomposed\` and create the canonical plan, index, and task records. Never convert an existing decomposed change to direct mode.
+
+For decomposed work, \`tasks.md\` is the sole completion state. Reconcile the index, task files, and \`plan.md\` together:
+
+- Keep every checkbox linked exactly once to a current task record within the same \`tasks/\` directory; keep IDs, titles, links, and dependencies consistent.
+- Update each affected task's outcome, acceptance/check, evidence applicability, \`## Next\`, and ISO-8601 UTC \`updated\` value. Every implementation or verification plan action must start with and map to one or more task IDs.
+- Add or split tasks when feedback creates independently verifiable work. Do not leave duplicate links, orphan task records, missing linked records, or untracked plan actions.
+- When a task is obsolete, retain its task record and indexed identity as a concise current reconciliation or verification outcome instead of deleting it without a valid replacement.
+- When feedback invalidates a checked task's outcome, acceptance boundary, dependency, or evidence basis, uncheck only that affected task, explain the stale applicability in its evidence, and set its next action. Keep independent checked tasks checked only after judging their evidence still applies. Reopen the parent \`state: open\` whenever the revision leaves any required work or evidence incomplete.
+
+Before reporting ready, review the revised contract and plan for contradictions, then confirm the decomposed index is nonempty, each linked task is structurally complete and in the same change directory, dependencies are coherent, and all completion checkboxes are truthful. Run read-only \`gdd status\` when available to catch malformed records; otherwise perform the same structural review. Stop at a reviewable revised plan or a consequential unresolved choice. Do not implement, repair source, weaken acceptance to match existing behavior, fabricate evidence, or delete durable history merely to simplify the revision.
+`,
+  build: `# Build
+
+Deliver the authorized outcome. Reconcile record, source, tests, and existing changes first. Design only as needed for safety. For a decomposed change, select the smallest unchecked task whose linked dependencies are complete; implement its outcome using project patterns and avoid speculative cleanup. Run and read its acceptance check, record actual task evidence, update its timestamp, and then change only that linked \`tasks.md\` checkbox to \`[x]\`.
 
 Keep the parent \`state: open\` until all checklist tasks and parent-level integration/preservation obligations have sufficient current evidence; then set it to \`verified\`. An unchecked task remains incomplete with its blocker in the linked task's \`## Next\`. Obtain a decision before changing behavioral intent.
 `,
@@ -72,6 +92,12 @@ Run authorized checks, record pass/fail/blocked/untested evidence, and state the
 };
 
 type Operation = keyof typeof operations;
+const operationTitles: Record<Operation, string> = {
+  design: 'Design',
+  'design-update': 'Design Update',
+  build: 'Build',
+  check: 'Check'
+};
 
 function frontmatter(name: string, description: string, version: string, agent = false): string {
   return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\ngdd: true\ngddVersion: ${JSON.stringify(version)}${agent ? "\nagent: 'agent'" : ''}\n---\n\n`;
@@ -86,21 +112,32 @@ export function renderHostFiles(host: Host, version: string): Record<string, str
     return Object.fromEntries(
       (Object.keys(operations) as Operation[]).map((operation) => [
         `.agents/skills/gdd-${operation}/SKILL.md`,
-        frontmatter(`gdd-${operation}`, `GDD ${operation} operation.`, version) + full(operation)
+        frontmatter(`gdd-${operation}`, `GDD ${operationTitles[operation]} operation.`, version) +
+          full(operation)
       ])
     );
   }
   const router = `# Route the request
 
-Classify without presenting a methodology menu: planning-only or exploratory requests use Shape; verification-only requests use Check; delivery, modification, or resume requests use Work. Ask only when intent is genuinely ambiguous. Apply the selected operation below in this conversation.
-\n${shared}\n${operations.shape}\n${operations.work}\n${operations.check}`;
+Classify without presenting a methodology menu: an explicit request to apply user feedback or revise a selected existing GDD change uses Design Update; new, planning-only, or exploratory requests use Design; verification-only requests use Check; delivery, modification, or resume requests use Build. Design Update is a Design specialization, not a new implementation authority. Ask only when intent is genuinely ambiguous. Apply the selected operation below in this conversation.
+\n${shared}\n${operations.design}\n${operations['design-update']}\n${operations.build}\n${operations.check}`;
   return {
     '.github/prompts/gdd.prompt.md':
-      frontmatter('gdd', 'Route a request to GDD Shape, Work, or Check.', version, true) + router,
+      frontmatter(
+        'gdd',
+        'Route a request to GDD Design, Design Update, Build, or Check.',
+        version,
+        true
+      ) + router,
     ...Object.fromEntries(
       (Object.keys(operations) as Operation[]).map((operation) => [
         `.github/prompts/gdd-${operation}.prompt.md`,
-        frontmatter(`gdd-${operation}`, `GDD ${operation} prompt.`, version, true) + full(operation)
+        frontmatter(
+          `gdd-${operation}`,
+          `GDD ${operationTitles[operation]} prompt.`,
+          version,
+          true
+        ) + full(operation)
       ])
     )
   };
@@ -108,7 +145,8 @@ Classify without presenting a methodology menu: planning-only or exploratory req
 
 export function baseFiles(version: string): Record<string, string> {
   return {
-    'gdd/README.md': `<!-- gdd: true -->\n# GDD\n\nGDD keeps compact durable records of software change intent, work, and evidence. Use generated prompts or skills: **Shape** plans, **Work** delivers, and **Check** verifies without source edits.\n\nTool-global files remain directly below \`gdd/\`. Each nontrivial change lives entirely below \`gdd/changes/<slug>/\`:\n\n- \`change.md\` — intent, contract, parent work coverage, integration evidence, and \`taskMode\`.\n- \`plan.md\` — detail for decomposed work; every action starts with its task ID.\n- \`tasks.md\` — the authoritative Markdown checkbox index for decomposed work.\n- \`tasks/<stable-id>-<slug>.md\` — detailed task outcome, dependencies, check, evidence, and next action.\n\nUse \`taskMode: decomposed\` for every plan or multi-action change; it requires a nonempty task index and linked task records. Use \`taskMode: direct\` only for one bounded action with one check and no plan. A checked task is valid only when its linked record has current evidence. A parent cannot be verified until every applicable task and parent-level acceptance are demonstrated.\n\nGenerated by GDD ${version}.\n`,
+    'gdd/README.md': `<!-- gdd: true -->\n# GDD\n\nGDD keeps compact durable records built on **Contract**, **Work**, and **Evidence**. Use generated prompts or skills: **Design** plans, **Design Update** revises an existing change from feedback without source edits, **Build** delivers, and **Check** verifies without source edits. Design Update is a Design specialization; Design, Build, and Check remain the three authority boundaries.\n\nTool-global files remain directly below \`gdd/\`. Each nontrivial change lives entirely below \`gdd/changes/<slug>/\`:\n\n- \`change.md\` — intent, contract, parent work coverage, integration evidence, and \`taskMode\`.\n- \`plan.md\` — detail for decomposed work; every action starts with its task ID.\n- \`tasks.md\` — the authoritative Markdown checkbox index for decomposed work.
+- \`tasks/<stable-id>-<slug>.md\` — detailed task outcome, dependencies, check, evidence, and next action.\n\nExisting generated \`gdd-shape\` and \`gdd-work\` assets are retired and preserved for manual cleanup; use Design and Build for all new work.\n\nUse \`taskMode: decomposed\` for every plan or multi-action change; it requires a nonempty task index and linked task records. Use \`taskMode: direct\` only for one bounded action with one check and no plan. A checked task is valid only when its linked record has current evidence. A parent cannot be verified until every applicable task and parent-level acceptance are demonstrated.\n\nGenerated by GDD ${version}.\n`,
     'gdd/templates/change.template.md': `---\ngdd: true\nid: <kebab-case-change-id>\ntitle: <concise outcome>\nstate: open\nupdated: <ISO-8601 UTC timestamp>\ntaskMode: decomposed # use direct only for one bounded action with one check and no plan\n# parent: <optional-parent-id>\n---\n\n# Intent\n\n## Contract\n\n## Decisions\n\n## Work\n\n## Evidence\n\n## Next\n\n<one next action or blocker>\n`,
     'gdd/templates/plan.template.md': `<!-- gdd: true -->\n# Plan: <outcome>\n\n## Prerequisites\n\n## Steps and checks\n\n1. T001 — <implementation or verification action and its check>\n\n## Risks and recovery\n`,
     'gdd/templates/tasks.template.md': `<!-- gdd: true -->\n# Tasks: <change outcome>\n\n<!-- Checkbox state is authoritative. Mark [x] only after the linked task has substantive evidence. -->\n\n## <task group>\n\n- [ ] T001 <concise outcome> — [details](tasks/T001-<slug>.md)\n`,
