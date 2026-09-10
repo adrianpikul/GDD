@@ -2,6 +2,7 @@ import { checkbox, confirm } from '@inquirer/prompts';
 import { Command } from 'commander';
 import { createRequire } from 'node:module';
 import { archive, init, update, status, formatActions, GddError } from './core.js';
+import { gddInitIntroLines, printGftBanner } from './gft-banner.js';
 import { formatStatus, shouldUseStatusColor } from './status-view.js';
 import type { ChangeState, Host } from './types.js';
 
@@ -22,6 +23,10 @@ async function selectedHosts(flags: HostFlags): Promise<Host[]> {
     throw new GddError(
       'Select a host with --agents, --github, or --all when not running interactively.'
     );
+  await printGftBanner();
+  console.log('');
+  for (const line of gddInitIntroLines()) console.log(`  ${line}`);
+  console.log('');
   const selected = await checkbox<Host>({
     message: 'Select agent integrations',
     choices: [
