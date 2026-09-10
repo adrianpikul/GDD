@@ -27,6 +27,14 @@ export interface ChangeRecord {
   next: string;
   tasks: TaskSummary;
 }
+export interface StatusIssue {
+  path: string;
+  error: string;
+}
+export interface StatusResult {
+  records: ChangeRecord[];
+  invalid: StatusIssue[];
+}
 export interface TaskRecord {
   path: string;
   id: string;

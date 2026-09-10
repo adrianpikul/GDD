@@ -3,15 +3,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  formatStatus,
-  GddError,
-  init,
-  isInside,
-  readManifest,
-  status,
-  update
-} from '../src/core.js';
+import { GddError, init, isInside, readManifest, status, update } from '../src/core.js';
+import { formatStatus, formatStatusIssues, shouldUseStatusColor } from '../src/status-view.js';
+import type { StatusResult } from '../src/types.js';
 
 const roots: string[] = [];
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -555,7 +549,7 @@ describe('status', () => {
       }
     ]);
     expect(result.invalid).toEqual([]);
-    expect(formatStatus(result.records)).toContain('tasks: 0/5 complete');
+    expect(formatStatus(result).output).toContain('0 / 5 tasks complete');
     expect(JSON.parse(JSON.stringify(result))).toMatchObject({
       records: [{ id: 'event-blue-red-themes', tasks: { total: 5, open: 5, completed: 0 } }],
       invalid: []
@@ -678,6 +672,90 @@ describe('status', () => {
     expect(errors).toContain('decomposed change requires a readable nonempty tasks.md');
     expect(errors).toContain('direct change cannot include plan.md; use taskMode: decomposed');
     expect(errors).toContain('taskMode must be decomposed or direct when present');
+  });
+});
+
+describe('status presentation', () => {
+  const result: StatusResult = {
+    records: [
+      {
+        path: 'gdd/changes/add-mint-orange-themes/change.md',
+        id: 'add-mint-orange-themes',
+        title: 'Add red and orange application themes',
+        state: 'open',
+        updated: '2026-09-10T11:28:50Z',
+        next: 'Run GDD Build to verify T003.',
+        tasks: { total: 3, open: 1, completed: 2, invalid: 1 }
+      },
+      {
+        path: 'gdd/changes/update-readme/change.md',
+        id: 'update-readme',
+        title: 'Update the README',
+        state: 'verified',
+        updated: 'not-a-date',
+        next: 'No further action.',
+        tasks: { total: 0, open: 0, completed: 0, invalid: 0 }
+      }
+    ],
+    invalid: [{ path: 'gdd/changes/broken/change.md', error: 'missing YAML frontmatter' }]
+  };
+
+  it('renders a readable, bounded plain status view and issues view', () => {
+    const presentation = formatStatus(result);
+
+    expect(presentation.output).toBe(`GDD status
+──────────
+2 changes · 1 open · 1 verified
+
+OPEN  Add red and orange application themes
+      add-mint-orange-themes
+      Progress  [███████░░░] 2 / 3 tasks complete · 1 invalid task
+      Updated   2026-09-10 11:28 UTC
+      Next      Run GDD Build to verify T003.
+
+VERIFIED  Update the README
+      update-readme
+      Progress  — no task breakdown
+      Updated   not-a-date
+      Next      No further action.`);
+    expect(presentation.issues).toBe(`GDD issues
+──────────
+1 invalid record
+
+! gdd/changes/broken/change.md
+  missing YAML frontmatter`);
+    expect(presentation.output).not.toContain('\u001B[');
+    expect(presentation.issues).not.toContain('\u001B[');
+  });
+
+  it('keeps large task progress bounded and shows an empty state', () => {
+    const large: StatusResult = {
+      records: [
+        {
+          ...result.records[0]!,
+          tasks: { total: 100, open: 50, completed: 50, invalid: 0 }
+        }
+      ],
+      invalid: []
+    };
+
+    expect(formatStatus(large).output).toContain('[█████░░░░░] 50 / 100 tasks complete');
+    expect(formatStatus({ records: [], invalid: [] }).output).toBe(`GDD status
+──────────
+0 changes
+
+No GDD changes found.`);
+  });
+
+  it('adds ANSI styling only when explicitly requested', () => {
+    const styled = formatStatus(result, { color: true });
+
+    expect(styled.output).toContain('\u001B[');
+    expect(styled.issues).toContain('\u001B[');
+    expect(formatStatusIssues([], { color: true })).toBe('');
+    expect(shouldUseStatusColor(true, undefined)).toBe(true);
+    expect(shouldUseStatusColor(false, undefined)).toBe(false);
+    expect(shouldUseStatusColor(true, '')).toBe(false);
   });
 });
 

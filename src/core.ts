@@ -2,7 +2,15 @@ import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { baseFiles, isManagedContent, renderHostFiles } from './templates.js';
-import type { ChangeRecord, ChangeState, Host, Manifest, TaskMode, TaskSummary } from './types.js';
+import type {
+  ChangeRecord,
+  ChangeState,
+  Host,
+  Manifest,
+  StatusResult,
+  TaskMode,
+  TaskSummary
+} from './types.js';
 
 export class GddError extends Error {}
 export type Action = {
@@ -412,10 +420,7 @@ async function parseTaskIndex(
   return entries;
 }
 
-export async function status(
-  rootInput: string,
-  state?: ChangeState
-): Promise<{ records: ChangeRecord[]; invalid: { path: string; error: string }[] }> {
+export async function status(rootInput: string, state?: ChangeState): Promise<StatusResult> {
   const root = normalizeRoot(rootInput);
   const manifest = await readManifest(root);
   if (!manifest) throw new GddError('Invalid or missing GDD manifest. Run gdd init first.');
@@ -603,16 +608,6 @@ export function formatActions(actions: Action[]): string {
         `${action.status.padEnd(9)} ${action.path}${action.message ? ` (${action.message})` : ''}`
     )
     .join('\n');
-}
-export function formatStatus(records: ChangeRecord[]): string {
-  return records.length
-    ? records
-        .map(
-          (record) =>
-            `${record.state.padEnd(8)} ${record.id} — ${record.title}\n  tasks: ${record.tasks.completed}/${record.tasks.total} complete${record.tasks.invalid ? `; ${record.tasks.invalid} invalid` : ''}\n  updated ${record.updated}\n  next: ${record.next}`
-        )
-        .join('\n')
-    : 'No GDD changes found.';
 }
 export function manifestJson(manifest: Manifest): string {
   return stringify(manifest);

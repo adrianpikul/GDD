@@ -1,7 +1,8 @@
 import { checkbox } from '@inquirer/prompts';
 import { Command } from 'commander';
 import { createRequire } from 'node:module';
-import { init, update, status, formatActions, formatStatus, GddError } from './core.js';
+import { init, update, status, formatActions, GddError } from './core.js';
+import { formatStatus, shouldUseStatusColor } from './status-view.js';
 import type { ChangeState, Host } from './types.js';
 
 const require = createRequire(import.meta.url);
@@ -70,9 +71,11 @@ program
     const result = await status(path, flags.state);
     if (flags.json) console.log(JSON.stringify(result, null, 2));
     else {
-      console.log(formatStatus(result.records));
-      for (const invalid of result.invalid)
-        console.error(`invalid  ${invalid.path} (${invalid.error})`);
+      const presentation = formatStatus(result, {
+        color: shouldUseStatusColor(process.stdout.isTTY, process.env.NO_COLOR)
+      });
+      console.log(presentation.output);
+      if (presentation.issues) console.error(presentation.issues);
     }
     if (result.invalid.length) process.exitCode = 1;
   });

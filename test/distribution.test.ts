@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { access, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -26,16 +26,17 @@ function run(
   command: string,
   args: string[],
   cwd = projectRoot,
-  env: NodeJS.ProcessEnv = process.env
-): Promise<{ stdout: string }> {
+  env: NodeJS.ProcessEnv = process.env,
+  allowFailure = false
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve, reject) => {
     execFile(command, args, { cwd, env }, (error, stdout, stderr) => {
-      if (error) {
+      if (error && !allowFailure) {
         error.message += `\n${stderr}`;
         reject(error);
         return;
       }
-      resolve({ stdout });
+      resolve({ stdout, stderr, exitCode: typeof error?.code === 'number' ? error.code : 0 });
     });
   });
 }
@@ -86,5 +87,48 @@ describe.sequential('built CLI distribution', () => {
     await run(process.execPath, [linkedBinary, 'update', project]);
     const status = await run(process.execPath, [linkedBinary, 'status', project, '--json']);
     expect(JSON.parse(status.stdout)).toMatchObject({ records: [], invalid: [] });
+  });
+
+  it('keeps human status streams readable and JSON isolated when records are invalid', async () => {
+    const project = await temporaryDirectory('gdd-status-consumer-');
+    await run(process.execPath, [cliPath, 'init', project, '--agents']);
+    const changeDirectory = join(project, 'gdd/changes/valid-change');
+    await mkdir(changeDirectory, { recursive: true });
+    await writeFile(
+      join(changeDirectory, 'change.md'),
+      '---\nid: valid-change\ntitle: Valid change\nstate: open\nupdated: 2026-09-10T11:28:50Z\n---\n\n# Intent\n\n## Next\n\nBuild the change.\n'
+    );
+    const invalidDirectory = join(project, 'gdd/changes/broken-change');
+    await mkdir(invalidDirectory, { recursive: true });
+    await writeFile(join(invalidDirectory, 'change.md'), 'not a GDD record\n');
+
+    const human = await run(
+      process.execPath,
+      [cliPath, 'status', project],
+      projectRoot,
+      process.env,
+      true
+    );
+    expect(human.exitCode).toBe(1);
+    expect(human.stdout).toContain('GDD status');
+    expect(human.stdout).toContain('OPEN  Valid change');
+    expect(human.stdout).not.toContain('\u001B[');
+    expect(human.stderr).toContain('GDD issues');
+    expect(human.stderr).toContain('gdd/changes/broken-change/change.md');
+
+    const json = await run(
+      process.execPath,
+      [cliPath, 'status', project, '--json'],
+      projectRoot,
+      { ...process.env, NO_COLOR: '' },
+      true
+    );
+    expect(json.exitCode).toBe(1);
+    expect(json.stderr).toBe('');
+    expect(json.stdout).not.toContain('\u001B[');
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      records: [{ id: 'valid-change' }],
+      invalid: [{ path: 'gdd/changes/broken-change/change.md' }]
+    });
   });
 });
