@@ -8,9 +8,10 @@ import {
   unlink,
   writeFile
 } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parse, stringify } from 'yaml';
+import { GddError } from './contracts.js';
 import { baseFiles, isManagedContent, renderHostFiles } from './templates.js';
 import type {
   ArchiveSummary,
@@ -23,7 +24,7 @@ import type {
   TaskSummary
 } from './types.js';
 
-export class GddError extends Error {}
+export { GddError } from './contracts.js';
 export type Action = {
   path: string;
   status: 'created' | 'updated' | 'unchanged' | 'refused';
@@ -33,6 +34,9 @@ const manifestPath = 'gdd/.gdd.json';
 const archiveStatePath = 'gdd/.gdd-archive.json';
 const archiveJournalPath = 'gdd/.gdd-archive.pending.json';
 const archiveStagingPath = 'gdd/.gdd-archive-staging';
+const operationLockPath = 'gdd/.gdd-operation.lock';
+const managedJournalPath = 'gdd/.gdd-managed.pending.json';
+const managedStagingPath = 'gdd/.gdd-managed-staging';
 const retiredOperationPaths = new Set([
   '.agents/skills/gdd-shape/SKILL.md',
   '.agents/skills/gdd-work/SKILL.md',
@@ -72,36 +76,90 @@ type ArchiveJournal = {
   archivedAt: string;
 };
 
+type OperationName = 'archive' | 'init' | 'update';
+type OperationLease = {
+  operationId: string;
+  command: OperationName;
+  startedAt: string;
+  pid: number;
+};
+type ManagedWrite = {
+  path: string;
+  content: string;
+};
+type ManagedWriteJournal = {
+  schemaVersion: 1;
+  operationId: string;
+  command: 'init' | 'update';
+  createdAt: string;
+  phase: 'staging' | 'prepared';
+  writes: Array<{
+    path: string;
+    stagedPath: string;
+    sha256: string;
+  }>;
+};
+
 async function exists(path: string): Promise<boolean> {
   try {
     await lstat(path);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw filesystemError(path, error);
   }
 }
 
 function isMissing(error: unknown): boolean {
+  return hasErrorCode(error, 'ENOENT');
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
   return (
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&
-    (error as { code?: unknown }).code === 'ENOENT'
+    (error as { code?: unknown }).code === code
   );
 }
 
+function filesystemError(path: string, error: unknown): GddError {
+  if (error instanceof GddError) return error;
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return new GddError(`Unable to access ${path}.`, 'filesystem_error', {
+    path,
+    ...(typeof code === 'string' ? { code } : {})
+  });
+}
+
 async function assertSafePath(root: string, relativePath: string): Promise<string> {
+  if (!isSafeRelativePath(relativePath))
+    throw new GddError(`Unsafe output path: ${relativePath}`, 'unsafe_path');
   const target = resolve(root, relativePath);
-  if (!isInside(root, target)) throw new GddError(`Unsafe output path: ${relativePath}`);
+  if (!isInside(root, target))
+    throw new GddError(`Unsafe output path: ${relativePath}`, 'unsafe_path');
   let cursor = root;
   for (const part of relativePath.split('/')) {
     cursor = resolve(cursor, part);
     if (await exists(cursor)) {
       const info = await lstat(cursor);
-      if (info.isSymbolicLink()) throw new GddError(`Refusing symbolic-link path: ${relativePath}`);
+      if (info.isSymbolicLink())
+        throw new GddError(`Refusing symbolic-link path: ${relativePath}`, 'unsafe_path');
     }
   }
   return target;
+}
+
+function isSafeRelativePath(value: string): boolean {
+  return (
+    Boolean(value) &&
+    !isAbsolute(value) &&
+    !value.includes('\\') &&
+    value.split('/').every((part) => part !== '' && part !== '.' && part !== '..')
+  );
 }
 
 async function readOptionalFile(root: string, relativePath: string): Promise<string | undefined> {
@@ -215,10 +273,10 @@ async function readArchiveJournal(root: string): Promise<ArchiveJournal | undefi
   return text === undefined ? undefined : parseArchiveJournal(text);
 }
 
-async function writeJsonAtomically(
+async function writeTextAtomically(
   root: string,
   relativePath: string,
-  value: unknown
+  content: string
 ): Promise<void> {
   const path = await assertSafePath(root, relativePath);
   await mkdir(dirname(path), { recursive: true });
@@ -226,7 +284,7 @@ async function writeJsonAtomically(
   const temporaryRelativePath = `${relativePath}.${randomUUID()}.tmp`;
   const temporaryPath = await assertSafePath(root, temporaryRelativePath);
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await writeFile(temporaryPath, content, 'utf8');
     await rename(temporaryPath, path);
   } catch (error) {
     try {
@@ -236,6 +294,360 @@ async function writeJsonAtomically(
       if (!isMissing(cleanupError)) throw cleanupError;
     }
     throw error;
+  }
+}
+
+async function writeJsonAtomically(
+  root: string,
+  relativePath: string,
+  value: unknown
+): Promise<void> {
+  await writeTextAtomically(root, relativePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function operationLeasePath(): string {
+  return `${operationLockPath}/lease.json`;
+}
+
+function operationStagingDirectory(operationId: string): string {
+  return `${managedStagingPath}/${operationId}`;
+}
+
+function hashContent(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function parseOperationLease(value: unknown): OperationLease | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const lease = value as Record<string, unknown>;
+  const operationId = lease.operationId;
+  const command = lease.command;
+  const startedAt = lease.startedAt;
+  const pid = lease.pid;
+  if (
+    lease.schemaVersion !== 1 ||
+    typeof operationId !== 'string' ||
+    (command !== 'archive' && command !== 'init' && command !== 'update') ||
+    !isIsoUtc(startedAt) ||
+    typeof pid !== 'number' ||
+    !Number.isSafeInteger(pid) ||
+    pid < 1
+  ) {
+    return undefined;
+  }
+  return {
+    operationId,
+    command,
+    startedAt,
+    pid
+  };
+}
+
+async function readOperationLease(root: string): Promise<OperationLease | undefined> {
+  const lockPath = await assertSafePath(root, operationLockPath);
+  if (!(await exists(lockPath))) return undefined;
+  const info = await lstat(lockPath);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new GddError('GDD operation lock is unsafe or malformed.', 'operation_in_progress');
+  }
+  const text = await readOptionalFile(root, operationLeasePath());
+  if (text === undefined) {
+    throw new GddError('GDD operation lock is incomplete.', 'operation_in_progress');
+  }
+  try {
+    const lease = parseOperationLease(JSON.parse(text));
+    if (!lease) throw new Error();
+    return lease;
+  } catch {
+    throw new GddError('GDD operation lock is malformed.', 'operation_in_progress');
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !hasErrorCode(error, 'ESRCH');
+  }
+}
+
+async function acquireOperation(root: string, command: OperationName): Promise<OperationLease> {
+  const lockPath = await assertSafePath(root, operationLockPath);
+  await mkdir(dirname(lockPath), { recursive: true });
+  await assertSafePath(root, operationLockPath);
+  try {
+    await mkdir(lockPath);
+  } catch (error) {
+    if (!hasErrorCode(error, 'EEXIST')) throw filesystemError(lockPath, error);
+    const existing = await readOperationLease(root);
+    if (!existing || isProcessAlive(existing.pid)) {
+      throw new GddError(
+        'A GDD operation is already in progress for this project.',
+        'operation_in_progress'
+      );
+    }
+    const stalePath = `${lockPath}.${randomUUID()}.stale`;
+    await rename(lockPath, stalePath);
+    try {
+      await mkdir(lockPath);
+    } catch (replacementError) {
+      throw filesystemError(lockPath, replacementError);
+    }
+    await removeSafeDirectoryTree(root, stalePath);
+  }
+  const lease: OperationLease = {
+    operationId: randomUUID(),
+    command,
+    startedAt: now(),
+    pid: process.pid
+  };
+  try {
+    await writeJsonAtomically(root, operationLeasePath(), { schemaVersion: 1, ...lease });
+  } catch (error) {
+    await removeSafeDirectoryTree(root, lockPath);
+    throw error;
+  }
+  return lease;
+}
+
+async function releaseOperation(root: string, operationId: string): Promise<void> {
+  const lease = await readOperationLease(root);
+  if (!lease || lease.operationId !== operationId) {
+    throw new GddError(
+      'GDD operation lock ownership changed unexpectedly.',
+      'operation_in_progress'
+    );
+  }
+  const lockPath = await assertSafePath(root, operationLockPath);
+  await removeSafeDirectoryTree(root, lockPath);
+}
+
+async function assertOperationReadable(root: string, operationId?: string): Promise<void> {
+  const lease = await readOperationLease(root);
+  if (lease && lease.operationId !== operationId) {
+    throw new GddError(
+      'A GDD operation is already in progress for this project.',
+      'operation_in_progress'
+    );
+  }
+}
+
+function parseManagedWriteJournal(value: unknown): ManagedWriteJournal {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new GddError('Managed-write recovery journal is malformed.', 'operation_in_progress');
+  }
+  const journal = value as Record<string, unknown>;
+  const operationId = journal.operationId;
+  const command = journal.command;
+  const createdAt = journal.createdAt;
+  const phase = journal.phase;
+  const rawWrites = journal.writes;
+  if (
+    journal.schemaVersion !== 1 ||
+    typeof operationId !== 'string' ||
+    (command !== 'init' && command !== 'update') ||
+    !isIsoUtc(createdAt) ||
+    (phase !== 'staging' && phase !== 'prepared') ||
+    !Array.isArray(rawWrites)
+  ) {
+    throw new GddError('Managed-write recovery journal is malformed.', 'operation_in_progress');
+  }
+  const writes = rawWrites.map((write) => {
+    if (!write || typeof write !== 'object' || Array.isArray(write)) {
+      throw new GddError('Managed-write recovery journal is malformed.', 'operation_in_progress');
+    }
+    const entry = write as Record<string, unknown>;
+    if (
+      typeof entry.path !== 'string' ||
+      !isSafeRelativePath(entry.path) ||
+      typeof entry.stagedPath !== 'string' ||
+      !entry.stagedPath.startsWith(`${operationStagingDirectory(operationId)}/`) ||
+      !isSafeRelativePath(entry.stagedPath) ||
+      typeof entry.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(entry.sha256)
+    ) {
+      throw new GddError('Managed-write recovery journal is malformed.', 'operation_in_progress');
+    }
+    return { path: entry.path, stagedPath: entry.stagedPath, sha256: entry.sha256 };
+  });
+  if (new Set(writes.map((write) => write.path)).size !== writes.length) {
+    throw new GddError('Managed-write recovery journal is malformed.', 'operation_in_progress');
+  }
+  return {
+    schemaVersion: 1,
+    operationId,
+    command,
+    createdAt,
+    phase,
+    writes
+  };
+}
+
+async function readManagedWriteJournal(root: string): Promise<ManagedWriteJournal | undefined> {
+  const text = await readOptionalFile(root, managedJournalPath);
+  if (text === undefined) return undefined;
+  try {
+    return parseManagedWriteJournal(JSON.parse(text));
+  } catch (error) {
+    if (error instanceof GddError) throw error;
+    throw new GddError('Managed-write recovery journal is malformed.', 'operation_in_progress');
+  }
+}
+
+async function removeManagedStagingDirectory(root: string, operationId: string): Promise<void> {
+  const path = await assertSafePath(root, operationStagingDirectory(operationId));
+  if (await exists(path)) await removeSafeDirectoryTree(root, path);
+  const rootPath = await assertSafePath(root, managedStagingPath);
+  if (await exists(rootPath)) {
+    const info = await lstat(rootPath);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new GddError(
+        'Managed-write staging directory is unsafe or malformed.',
+        'operation_in_progress'
+      );
+    }
+    if ((await readdir(rootPath)).length === 0) await rmdir(rootPath);
+  }
+}
+
+async function assertManagedStagingLayout(
+  root: string,
+  journal: ManagedWriteJournal
+): Promise<void> {
+  const rootPath = await assertSafePath(root, managedStagingPath);
+  if (!(await exists(rootPath))) {
+    if (journal.phase === 'prepared') {
+      throw new GddError(
+        'Managed-write recovery cannot locate staged content.',
+        'operation_in_progress'
+      );
+    }
+    return;
+  }
+  const rootInfo = await lstat(rootPath);
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+    throw new GddError(
+      'Managed-write staging directory is unsafe or malformed.',
+      'operation_in_progress'
+    );
+  }
+  const rootEntries = await readdir(rootPath, { withFileTypes: true });
+  if (rootEntries.some((entry) => entry.name !== journal.operationId)) {
+    throw new GddError(
+      'Managed-write staging contains an untracked operation.',
+      'operation_in_progress'
+    );
+  }
+  const operationPath = await assertSafePath(root, operationStagingDirectory(journal.operationId));
+  if (!(await exists(operationPath))) {
+    if (journal.phase === 'prepared') {
+      throw new GddError(
+        'Managed-write recovery cannot locate staged content.',
+        'operation_in_progress'
+      );
+    }
+    return;
+  }
+  const operationInfo = await lstat(operationPath);
+  if (operationInfo.isSymbolicLink() || !operationInfo.isDirectory()) {
+    throw new GddError(
+      'Managed-write staging directory is unsafe or malformed.',
+      'operation_in_progress'
+    );
+  }
+  if (journal.phase === 'staging') return;
+  const expected = new Set(journal.writes.map((write) => basename(write.stagedPath)));
+  const stagedEntries = await readdir(operationPath, { withFileTypes: true });
+  if (
+    stagedEntries.length !== expected.size ||
+    stagedEntries.some((entry) => !entry.isFile() || !expected.has(entry.name))
+  ) {
+    throw new GddError(
+      'Managed-write recovery cannot verify staged content.',
+      'operation_in_progress'
+    );
+  }
+}
+
+async function recoverManagedWrites(root: string): Promise<void> {
+  const journal = await readManagedWriteJournal(root);
+  if (!journal) {
+    const rootPath = await assertSafePath(root, managedStagingPath);
+    if (!(await exists(rootPath))) return;
+    const info = await lstat(rootPath);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new GddError(
+        'Managed-write staging directory is unsafe or malformed.',
+        'operation_in_progress'
+      );
+    }
+    if ((await readdir(rootPath)).length) {
+      throw new GddError('Managed-write recovery journal is missing.', 'operation_in_progress');
+    }
+    await rmdir(rootPath);
+    return;
+  }
+  await assertManagedStagingLayout(root, journal);
+  if (journal.phase === 'staging') {
+    await removeManagedStagingDirectory(root, journal.operationId);
+    await removeRegularFile(root, managedJournalPath);
+    return;
+  }
+  for (const write of journal.writes) {
+    const content = await readOptionalFile(root, write.stagedPath);
+    if (content === undefined || hashContent(content) !== write.sha256) {
+      throw new GddError(
+        'Managed-write recovery cannot verify staged content.',
+        'operation_in_progress'
+      );
+    }
+    await writeTextAtomically(root, write.path, content);
+  }
+  await removeManagedStagingDirectory(root, journal.operationId);
+  await removeRegularFile(root, managedJournalPath);
+}
+
+async function commitManagedWrites(
+  root: string,
+  lease: OperationLease,
+  command: 'init' | 'update',
+  writes: ManagedWrite[]
+): Promise<void> {
+  if (!writes.length) return;
+  const stagedWrites = writes.map((write, index) => ({
+    path: write.path,
+    stagedPath: `${operationStagingDirectory(lease.operationId)}/${index}.content`,
+    sha256: hashContent(write.content),
+    content: write.content
+  }));
+  const journal: ManagedWriteJournal = {
+    schemaVersion: 1,
+    operationId: lease.operationId,
+    command,
+    createdAt: now(),
+    phase: 'staging',
+    writes: stagedWrites.map(({ path, stagedPath, sha256 }) => ({ path, stagedPath, sha256 }))
+  };
+  await writeJsonAtomically(root, managedJournalPath, journal);
+  for (const stagedWrite of stagedWrites) {
+    await writeTextAtomically(root, stagedWrite.stagedPath, stagedWrite.content);
+  }
+  await writeJsonAtomically(root, managedJournalPath, { ...journal, phase: 'prepared' });
+  await recoverManagedWrites(root);
+}
+
+async function withOperation<T>(
+  root: string,
+  command: OperationName,
+  operation: (lease: OperationLease) => Promise<T>
+): Promise<T> {
+  const lease = await acquireOperation(root, command);
+  try {
+    await recoverManagedWrites(root);
+    return await operation(lease);
+  } finally {
+    await releaseOperation(root, lease.operationId);
   }
 }
 
@@ -303,8 +715,9 @@ function archiveStagedPath(slug: string): string {
 async function readText(path: string): Promise<string | undefined> {
   try {
     return await readFile(path, 'utf8');
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw filesystemError(path, error);
   }
 }
 
@@ -419,20 +832,27 @@ function issueBelongsToChange(issuePath: string, slug: string): boolean {
   return issuePath === `${directory}/change.md` || issuePath.startsWith(`${directory}/`);
 }
 
-async function eligibleArchiveRecord(root: string, slug: string): Promise<ChangeRecord> {
+async function eligibleArchiveRecord(
+  root: string,
+  slug: string,
+  operationId: string
+): Promise<ChangeRecord> {
   const changePath = await assertSafePath(root, archiveChangePath(slug));
-  if (!(await exists(changePath))) throw new GddError(`GDD change not found: ${slug}`);
+  if (!(await exists(changePath))) throw new GddError(`GDD change not found: ${slug}`, 'not_found');
   await assertSafeDirectoryTree(root, changePath);
-  const result = await status(root);
+  const result = await status(root, undefined, operationId);
   const record = result.records.find(
     (candidate) => candidate.path === `${archiveChangePath(slug)}/change.md`
   );
-  if (!record) throw new GddError(`GDD change not found: ${slug}`);
+  if (!record) throw new GddError(`GDD change not found: ${slug}`, 'not_found');
   if (record.state !== 'verified')
-    throw new GddError(`Only verified changes can be archived: ${slug}`);
+    throw new GddError(`Only verified changes can be archived: ${slug}`, 'archive_incomplete');
   const issues = result.invalid.filter((issue) => issueBelongsToChange(issue.path, slug));
   if (issues.length || record.tasks.open || record.tasks.invalid) {
-    throw new GddError(`GDD change must be complete and valid before archiving: ${slug}`);
+    throw new GddError(
+      `GDD change must be complete and valid before archiving: ${slug}`,
+      'archive_incomplete'
+    );
   }
   return record;
 }
@@ -442,51 +862,113 @@ export async function archive(
   slug: string,
   confirmed: boolean
 ): Promise<ArchiveSummary> {
-  if (!confirmed) throw new GddError('Archiving requires explicit confirmation.');
-  if (!isArchiveSlug(slug)) throw new GddError('Archive slug must be a kebab-case change ID.');
+  if (!confirmed)
+    throw new GddError(
+      'Archiving requires explicit confirmation.',
+      'archive_confirmation_required'
+    );
+  if (!isArchiveSlug(slug))
+    throw new GddError('Archive slug must be a kebab-case change ID.', 'invalid_argument');
   const root = normalizeRoot(rootInput);
-  await recoverArchive(root);
-  const record = await eligibleArchiveRecord(root, slug);
-  const sourceRelativePath = archiveChangePath(slug);
-  const stagedRelativePath = archiveStagedPath(slug);
-  const sourcePath = await assertSafePath(root, sourceRelativePath);
-  await createArchiveStagingDirectory(root);
-  const stagedPath = await assertSafePath(root, stagedRelativePath);
-  if (await exists(stagedPath)) throw new GddError(`Archive staging already exists for: ${slug}`);
-  const journal: ArchiveJournal = {
-    schemaVersion: 1,
-    operationId: randomUUID(),
-    slug,
-    tasks: record.tasks.total,
-    archivedAt: now()
-  };
-  await writeArchiveJournal(root, journal);
-  try {
-    await rename(sourcePath, stagedPath);
-  } catch (error) {
-    await removeRegularFile(root, archiveJournalPath, true);
-    throw error;
-  }
-  await recoverArchive(root);
-  return archiveSummary(await readArchiveState(root));
+  return withOperation(root, 'archive', async (lease) => {
+    await recoverArchive(root);
+    const record = await eligibleArchiveRecord(root, slug, lease.operationId);
+    const sourceRelativePath = archiveChangePath(slug);
+    const stagedRelativePath = archiveStagedPath(slug);
+    const sourcePath = await assertSafePath(root, sourceRelativePath);
+    await createArchiveStagingDirectory(root);
+    const stagedPath = await assertSafePath(root, stagedRelativePath);
+    if (await exists(stagedPath)) throw new GddError(`Archive staging already exists for: ${slug}`);
+    const journal: ArchiveJournal = {
+      schemaVersion: 1,
+      operationId: randomUUID(),
+      slug,
+      tasks: record.tasks.total,
+      archivedAt: now()
+    };
+    await writeArchiveJournal(root, journal);
+    try {
+      await rename(sourcePath, stagedPath);
+    } catch (error) {
+      await removeRegularFile(root, archiveJournalPath, true);
+      throw error;
+    }
+    await recoverArchive(root);
+    return archiveSummary(await readArchiveState(root));
+  });
 }
 
 export async function readManifest(root: string): Promise<Manifest | undefined> {
   const path = await assertSafePath(root, manifestPath);
   const text = await readText(path);
-  if (!text) return undefined;
+  if (text === undefined) return undefined;
+  if (!text.trim()) throw new GddError(`Invalid GDD manifest: ${manifestPath}`, 'invalid_manifest');
+  let value: unknown;
   try {
-    const value = JSON.parse(text) as Manifest;
-    if (
-      value.generatedBy !== 'gdd' ||
-      value.schemaVersion !== 1 ||
-      !Array.isArray(value.managedPaths)
-    )
-      throw new Error();
-    return value;
+    value = JSON.parse(text);
   } catch {
-    throw new GddError(`Invalid GDD manifest: ${manifestPath}`);
+    throw new GddError(`Invalid GDD manifest: ${manifestPath}`, 'invalid_manifest');
   }
+  const manifest = parseManifest(value);
+  for (const managedPath of manifest.managedPaths) await assertSafePath(root, managedPath);
+  return manifest;
+}
+
+function parseManifest(value: unknown): Manifest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new GddError(`Invalid GDD manifest: ${manifestPath}`, 'invalid_manifest');
+  }
+  const manifest = value as Record<string, unknown>;
+  const expectedFields = new Set([
+    'schemaVersion',
+    'generatedBy',
+    'generatorVersion',
+    'hosts',
+    'managedPaths',
+    'createdAt',
+    'updatedAt'
+  ]);
+  if (Object.keys(manifest).some((key) => !expectedFields.has(key))) {
+    throw new GddError(`Invalid GDD manifest: ${manifestPath}`, 'invalid_manifest');
+  }
+  if (
+    manifest.schemaVersion !== 1 ||
+    manifest.generatedBy !== 'gdd' ||
+    !isVersion(manifest.generatorVersion) ||
+    !Array.isArray(manifest.hosts) ||
+    !Array.isArray(manifest.managedPaths) ||
+    !isIsoUtc(manifest.createdAt) ||
+    !isIsoUtc(manifest.updatedAt)
+  ) {
+    throw new GddError(`Invalid GDD manifest: ${manifestPath}`, 'invalid_manifest');
+  }
+  const hosts = manifest.hosts;
+  const managedPaths = manifest.managedPaths;
+  if (
+    !hosts.length ||
+    hosts.some((host) => host !== 'agents' && host !== 'github') ||
+    new Set(hosts).size !== hosts.length ||
+    managedPaths.some((path) => typeof path !== 'string' || !isSafeRelativePath(path)) ||
+    new Set(managedPaths).size !== managedPaths.length
+  ) {
+    throw new GddError(`Invalid GDD manifest: ${manifestPath}`, 'invalid_manifest');
+  }
+  return {
+    schemaVersion: 1,
+    generatedBy: 'gdd',
+    generatorVersion: manifest.generatorVersion,
+    hosts: [...hosts],
+    managedPaths: [...managedPaths],
+    createdAt: manifest.createdAt,
+    updatedAt: manifest.updatedAt
+  };
+}
+
+function isVersion(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value)
+  );
 }
 
 function filesFor(hosts: Host[], version: string): Record<string, string> {
@@ -508,18 +990,18 @@ function managedPathsFor(previousPaths: string[], files: Record<string, string>)
   ].sort();
 }
 
-async function writeManaged(
+async function planManagedWrites(
   root: string,
   files: Record<string, string>,
   force: boolean
-): Promise<Action[]> {
+): Promise<{ actions: Action[]; writes: ManagedWrite[] }> {
   const actions: Action[] = [];
+  const writes: ManagedWrite[] = [];
   for (const [relativePath, content] of Object.entries(files)) {
     const path = await assertSafePath(root, relativePath);
     const previous = await readText(path);
     if (previous === undefined) {
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, content, 'utf8');
+      writes.push({ path: relativePath, content });
       actions.push({ path: relativePath, status: 'created' });
       continue;
     }
@@ -539,16 +1021,10 @@ async function writeManaged(
       });
       continue;
     }
-    await writeFile(path, content, 'utf8');
+    writes.push({ path: relativePath, content });
     actions.push({ path: relativePath, status: 'updated' });
   }
-  return actions;
-}
-
-async function writeManifest(root: string, manifest: Manifest): Promise<void> {
-  const path = await assertSafePath(root, manifestPath);
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  return { actions, writes };
 }
 
 export async function init(
@@ -558,48 +1034,68 @@ export async function init(
   version: string
 ): Promise<Action[]> {
   const root = normalizeRoot(rootInput);
-  const prior = await readManifest(root);
-  const selected = [...new Set([...(prior?.hosts ?? []), ...hosts])].sort() as Host[];
-  const files = filesFor(selected, version);
-  const actions = await writeManaged(root, files, force);
-  const timestamp = now();
-  const managedPaths = managedPathsFor(prior?.managedPaths ?? [], files);
-  await writeManifest(root, {
-    schemaVersion: 1,
-    generatedBy: 'gdd',
-    generatorVersion: version,
-    hosts: selected,
-    managedPaths,
-    createdAt: prior?.createdAt ?? timestamp,
-    updatedAt: timestamp
+  return withOperation(root, 'init', async (lease) => {
+    const prior = await readManifest(root);
+    const selected = [...new Set([...(prior?.hosts ?? []), ...hosts])].sort() as Host[];
+    if (!selected.length)
+      throw new GddError('Select at least one supported host.', 'invalid_argument');
+    const files = filesFor(selected, version);
+    const plan = await planManagedWrites(root, files, force);
+    if (plan.actions.some((action) => action.status === 'refused')) return plan.actions;
+    const timestamp = now();
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      generatedBy: 'gdd',
+      generatorVersion: version,
+      hosts: selected,
+      managedPaths: managedPathsFor(prior?.managedPaths ?? [], files),
+      createdAt: prior?.createdAt ?? timestamp,
+      updatedAt: timestamp
+    };
+    await commitManagedWrites(root, lease, 'init', [
+      ...plan.writes,
+      { path: manifestPath, content: `${JSON.stringify(manifest, null, 2)}\n` }
+    ]);
+    return plan.actions;
   });
-  return actions;
 }
 
 export async function update(rootInput: string, version: string): Promise<Action[]> {
   const root = normalizeRoot(rootInput);
-  const manifest = await readManifest(root);
-  if (!manifest) throw new GddError('GDD is not initialized. Run gdd init first.');
-  const files = filesFor(manifest.hosts, version);
-  const actions = await writeManaged(root, files, true);
-  await writeManifest(root, {
-    ...manifest,
-    generatorVersion: version,
-    managedPaths: managedPathsFor(manifest.managedPaths, files),
-    updatedAt: now()
+  return withOperation(root, 'update', async (lease) => {
+    const manifest = await readManifest(root);
+    if (!manifest)
+      throw new GddError('GDD is not initialized. Run gdd init first.', 'not_initialized');
+    const files = filesFor(manifest.hosts, version);
+    const plan = await planManagedWrites(root, files, true);
+    if (plan.actions.some((action) => action.status === 'refused')) return plan.actions;
+    const updatedManifest: Manifest = {
+      ...manifest,
+      generatorVersion: version,
+      managedPaths: managedPathsFor(manifest.managedPaths, files),
+      updatedAt: now()
+    };
+    await commitManagedWrites(root, lease, 'update', [
+      ...plan.writes,
+      { path: manifestPath, content: `${JSON.stringify(updatedManifest, null, 2)}\n` }
+    ]);
+    return plan.actions;
   });
-  return actions;
 }
 
 async function findMarkdownFiles(directory: string, missingIsEmpty = false): Promise<string[]> {
   let info;
   try {
     info = await lstat(directory);
-  } catch {
-    if (missingIsEmpty) return [];
-    throw new GddError(
-      'GDD directory is missing. Run gdd init --force to repair the installation.'
-    );
+  } catch (error) {
+    if (isMissing(error)) {
+      if (missingIsEmpty) return [];
+      throw new GddError(
+        'GDD directory is missing. Run gdd init --force to repair the installation.',
+        'not_initialized'
+      );
+    }
+    throw filesystemError(directory, error);
   }
   if (info.isSymbolicLink()) throw new GddError(`Refusing symbolic-link path: ${directory}`);
   if (!info.isDirectory()) return [];
@@ -823,10 +1319,16 @@ async function parseTaskIndex(
   return entries;
 }
 
-export async function status(rootInput: string, state?: ChangeState): Promise<StatusResult> {
+export async function status(
+  rootInput: string,
+  state?: ChangeState,
+  operationId?: string
+): Promise<StatusResult> {
   const root = normalizeRoot(rootInput);
+  await assertOperationReadable(root, operationId);
   const manifest = await readManifest(root);
-  if (!manifest) throw new GddError('Invalid or missing GDD manifest. Run gdd init first.');
+  if (!manifest)
+    throw new GddError('Invalid or missing GDD manifest. Run gdd init first.', 'not_initialized');
   const gdd = await assertSafePath(root, 'gdd');
   const records: ChangeRecord[] = [];
   const invalid: { path: string; error: string }[] = [];

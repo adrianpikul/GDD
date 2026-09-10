@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/adrianpikul/GDD/schemas/v1/error.schema.json",
+  "title": "GDD command error envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "gddVersion", "command", "ok", "error"],
+  "properties": {
+    "contractVersion": { "const": 1 },
+    "gddVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "command": { "enum": ["init", "update", "status", "archive"] },
+    "ok": { "const": false },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "archive_confirmation_required",
+            "archive_incomplete",
+            "filesystem_error",
+            "internal_error",
+            "invalid_argument",
+            "invalid_manifest",
+            "not_initialized",
+            "not_found",
+            "operation_in_progress",
+            "unmanaged_collision",
+            "unsafe_path"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "details": { "type": "object" }
+      }
+    }
+  }
+}

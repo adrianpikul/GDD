@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/adrianpikul/GDD/schemas/v1/validation-finding.schema.json",
+  "title": "GDD validation finding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "error"],
+  "properties": {
+    "path": { "type": "string", "minLength": 1 },
+    "error": { "type": "string", "minLength": 1 }
+  }
+}

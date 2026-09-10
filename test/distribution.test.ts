@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -13,6 +14,8 @@ const packageJson = require('../package.json') as {
 };
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const cliPath = join(projectRoot, packageJson.bin.gdd);
+const successSchemaPath = join(projectRoot, 'schemas/v1/command-success.schema.json');
+const errorSchemaPath = join(projectRoot, 'schemas/v1/error.schema.json');
 const temporaryPaths: string[] = [];
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
@@ -39,6 +42,12 @@ function run(
       resolve({ stdout, stderr, exitCode: typeof error?.code === 'number' ? error.code : 0 });
     });
   });
+}
+
+async function expectV1Schema(value: unknown, schemaPath: string): Promise<void> {
+  const ajv = new Ajv2020({ strict: true });
+  const validator = ajv.compile(JSON.parse(await readFile(schemaPath, 'utf8')) as object);
+  expect(validator(value), JSON.stringify(validator.errors)).toBe(true);
 }
 
 afterEach(async () => {
@@ -75,7 +84,16 @@ describe.sequential('built CLI distribution', () => {
     const packagedEntry = Array.isArray(packageContents)
       ? packageContents[0]
       : Object.values(packageContents)[0];
-    expect(packagedEntry?.files.map((file) => file.path)).toContain(packageJson.bin.gdd);
+    const packagedPaths = packagedEntry?.files.map((file) => file.path) ?? [];
+    expect(packagedPaths).toContain(packageJson.bin.gdd);
+    for (const schema of [
+      'schemas/v1/manifest.schema.json',
+      'schemas/v1/command-success.schema.json',
+      'schemas/v1/validation-finding.schema.json',
+      'schemas/v1/error.schema.json'
+    ]) {
+      expect(packagedPaths).toContain(schema);
+    }
 
     const prefix = await temporaryDirectory('gdd-link-prefix-');
     await run(npmCommand, ['link'], projectRoot, { ...process.env, npm_config_prefix: prefix });
@@ -83,9 +101,32 @@ describe.sequential('built CLI distribution', () => {
     expect(await realpath(linkedBinary)).toBe(cliPath);
 
     const project = await temporaryDirectory('gdd-linked-consumer-');
-    await run(process.execPath, [linkedBinary, 'init', project, '--agents']);
+    const initialized = await run(process.execPath, [
+      linkedBinary,
+      'init',
+      project,
+      '--agents',
+      '--json'
+    ]);
+    const initializedResult = JSON.parse(initialized.stdout);
+    await expectV1Schema(initializedResult, successSchemaPath);
+    expect(initializedResult).toMatchObject({
+      contractVersion: 1,
+      gddVersion: packageJson.version,
+      command: 'init',
+      ok: true,
+      result: { actions: expect.any(Array) }
+    });
     await access(join(project, 'gdd/.gdd.json'));
-    await run(process.execPath, [linkedBinary, 'update', project]);
+    const updated = await run(process.execPath, [linkedBinary, 'update', project, '--json']);
+    const updatedResult = JSON.parse(updated.stdout);
+    await expectV1Schema(updatedResult, successSchemaPath);
+    expect(updatedResult).toMatchObject({
+      contractVersion: 1,
+      command: 'update',
+      ok: true,
+      result: { actions: expect.any(Array) }
+    });
     const changeDirectory = join(project, 'gdd/changes/completed-change');
     await mkdir(changeDirectory, { recursive: true });
     await writeFile(
@@ -106,14 +147,25 @@ describe.sequential('built CLI distribution', () => {
       'archive',
       'completed-change',
       project,
-      '--yes'
+      '--yes',
+      '--json'
     ]);
-    expect(archived.stdout).toContain('Archived completed-change.');
+    const archivedResult = JSON.parse(archived.stdout);
+    await expectV1Schema(archivedResult, successSchemaPath);
+    expect(archivedResult).toMatchObject({
+      contractVersion: 1,
+      command: 'archive',
+      ok: true,
+      result: { slug: 'completed-change', archive: { changes: 1, tasks: 0 } }
+    });
     const status = await run(process.execPath, [linkedBinary, 'status', project, '--json']);
-    expect(JSON.parse(status.stdout)).toMatchObject({
-      records: [],
-      invalid: [],
-      archive: { changes: 1, tasks: 0 }
+    const statusResult = JSON.parse(status.stdout);
+    await expectV1Schema(statusResult, successSchemaPath);
+    expect(statusResult).toMatchObject({
+      contractVersion: 1,
+      command: 'status',
+      ok: true,
+      result: { records: [], invalid: [], archive: { changes: 1, tasks: 0 } }
     });
   });
 
@@ -154,9 +206,89 @@ describe.sequential('built CLI distribution', () => {
     expect(json.exitCode).toBe(1);
     expect(json.stderr).toBe('');
     expect(json.stdout).not.toContain('\u001B[');
-    expect(JSON.parse(json.stdout)).toMatchObject({
-      records: [{ id: 'valid-change' }],
-      invalid: [{ path: 'gdd/changes/broken-change/change.md' }]
+    const jsonResult = JSON.parse(json.stdout);
+    await expectV1Schema(jsonResult, successSchemaPath);
+    expect(jsonResult).toMatchObject({
+      contractVersion: 1,
+      command: 'status',
+      ok: true,
+      result: {
+        records: [{ id: 'valid-change' }],
+        invalid: [{ path: 'gdd/changes/broken-change/change.md' }]
+      }
+    });
+
+    const invalidArgument = await run(
+      process.execPath,
+      [cliPath, 'status', project, '--state', 'in-progress', '--json'],
+      projectRoot,
+      process.env,
+      true
+    );
+    expect(invalidArgument.exitCode).toBe(1);
+    expect(invalidArgument.stderr).toBe('');
+    const invalidArgumentResult = JSON.parse(invalidArgument.stdout);
+    await expectV1Schema(invalidArgumentResult, errorSchemaPath);
+    expect(invalidArgumentResult).toMatchObject({
+      contractVersion: 1,
+      command: 'status',
+      ok: false,
+      error: { code: 'invalid_argument' }
+    });
+  });
+
+  it('emits structured JSON failures without presentation output', async () => {
+    const project = await temporaryDirectory('gdd-json-errors-');
+    const notInitialized = await run(
+      process.execPath,
+      [cliPath, 'update', project, '--json'],
+      projectRoot,
+      process.env,
+      true
+    );
+    expect(notInitialized.exitCode).toBe(1);
+    expect(notInitialized.stderr).toBe('');
+    const notInitializedResult = JSON.parse(notInitialized.stdout);
+    await expectV1Schema(notInitializedResult, errorSchemaPath);
+    expect(notInitializedResult).toMatchObject({
+      command: 'update',
+      ok: false,
+      error: { code: 'not_initialized' }
+    });
+
+    const missingHost = await run(
+      process.execPath,
+      [cliPath, 'init', project, '--json'],
+      projectRoot,
+      process.env,
+      true
+    );
+    expect(missingHost.exitCode).toBe(1);
+    expect(missingHost.stderr).toBe('');
+    const missingHostResult = JSON.parse(missingHost.stdout);
+    await expectV1Schema(missingHostResult, errorSchemaPath);
+    expect(missingHostResult).toMatchObject({
+      command: 'init',
+      ok: false,
+      error: { code: 'invalid_argument' }
+    });
+
+    await run(process.execPath, [cliPath, 'init', project, '--agents']);
+    const confirmation = await run(
+      process.execPath,
+      [cliPath, 'archive', 'missing-change', project, '--json'],
+      projectRoot,
+      process.env,
+      true
+    );
+    expect(confirmation.exitCode).toBe(1);
+    expect(confirmation.stderr).toBe('');
+    const confirmationResult = JSON.parse(confirmation.stdout);
+    await expectV1Schema(confirmationResult, errorSchemaPath);
+    expect(confirmationResult).toMatchObject({
+      command: 'archive',
+      ok: false,
+      error: { code: 'archive_confirmation_required' }
     });
   });
 });

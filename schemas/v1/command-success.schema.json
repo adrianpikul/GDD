@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/adrianpikul/GDD/schemas/v1/command-success.schema.json",
+  "title": "GDD command success envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "gddVersion", "command", "ok", "result"],
+  "properties": {
+    "contractVersion": { "const": 1 },
+    "gddVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "command": { "enum": ["init", "update", "status", "archive"] },
+    "ok": { "const": true },
+    "result": { "type": "object" }
+  }
+}

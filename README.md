@@ -69,18 +69,50 @@ For new records, `tasks.md` is the source of truth for completion. A task is che
 
 ## CLI reference
 
-| Command                                 | Purpose                                                                                                    |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `gdd init [path] --agents`              | Generate Codex-style skills under `.agents/skills/` plus GDD templates and manifest.                       |
-| `gdd init [path] --github`              | Generate GitHub Copilot prompt files under `.github/prompts/` plus GDD templates and manifest.             |
-| `gdd init [path] --all`                 | Generate both currently supported integrations.                                                            |
-| `gdd init [path] --force`               | Refresh differing GDD-managed files and repair incomplete installs; unmanaged collisions remain protected. |
-| `gdd update [path]`                     | Refresh templates and assets recorded in the existing GDD manifest.                                        |
-| `gdd status [path]`                     | Show change state, task progress, next actions, invalid records, and archive totals.                       |
-| `gdd status [path] --state open --json` | Filter to open changes and emit machine-readable status. Valid states are `open` and `verified`.           |
-| `gdd archive <slug> [path] --yes`       | Permanently remove one verified, valid change and update aggregate archive totals.                         |
+| Command                                  | Purpose                                                                                                    |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `gdd init [path] --agents`               | Generate Codex-style skills under `.agents/skills/` plus GDD templates and manifest.                       |
+| `gdd init [path] --github`               | Generate GitHub Copilot prompt files under `.github/prompts/` plus GDD templates and manifest.             |
+| `gdd init [path] --all`                  | Generate both currently supported integrations.                                                            |
+| `gdd init [path] --force`                | Refresh differing GDD-managed files and repair incomplete installs; unmanaged collisions remain protected. |
+| `gdd init [path] --all --json`           | Initialize and return a versioned machine-readable success or error envelope.                              |
+| `gdd update [path]`                      | Refresh templates and assets recorded in the existing GDD manifest.                                        |
+| `gdd update [path] --json`               | Update and return a versioned machine-readable success or error envelope.                                  |
+| `gdd status [path]`                      | Show change state, task progress, next actions, invalid records, and archive totals.                       |
+| `gdd status [path] --state open --json`  | Filter to open changes and emit machine-readable status. Valid states are `open` and `verified`.           |
+| `gdd archive <slug> [path] --yes`        | Permanently remove one verified, valid change and update aggregate archive totals.                         |
+| `gdd archive <slug> [path] --yes --json` | Archive and return a versioned machine-readable success or error envelope.                                 |
 
 Use `gdd --help` or `gdd <command> --help` for the executable's current command help.
+
+### Automation contract
+
+GDD version 1 defines machine-readable response and state contracts under `schemas/v1/` in the installed package:
+
+- `manifest.schema.json` — the persisted `gdd/.gdd.json` contract.
+- `command-success.schema.json` — successful `--json` command responses.
+- `validation-finding.schema.json` — individual validation findings.
+- `error.schema.json` — expected `--json` command failures.
+
+Every v1 automation response declares `contractVersion: 1` and `gddVersion`. Consumers must check the contract version before interpreting the command result. A future incompatible contract will use a new schema directory and version; do not infer compatibility from the CLI version alone.
+
+Use `--json` for a CI job, bot, or dashboard. It writes exactly one JSON object to stdout for both success and expected failure; normal command presentation is suppressed. A successful command uses this envelope:
+
+```json
+{
+  "contractVersion": 1,
+  "gddVersion": "1.0.0",
+  "command": "status",
+  "ok": true,
+  "result": {}
+}
+```
+
+An unsuccessful JSON command exits nonzero and uses `error.schema.json`, including a stable `error.code`. Treat fields not defined by the applicable schema as unsupported.
+
+#### Migration from earlier `status --json` output
+
+The 2026-09-10 repository compatibility audit found no checked-in external consumers of the earlier bare status object; references were limited to this repository's own tests and documentation. As a result, v1 is the supported JSON interface and GDD does not provide a legacy-output flag. Update consumers to read `result.records`, `result.invalid`, and `result.archive` from the v1 success envelope, and inspect `ok` before accessing `result`. The change is also recorded in the [changelog](CHANGELOG.md).
 
 ## Integration notes
 

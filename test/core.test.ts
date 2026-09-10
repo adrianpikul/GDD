@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -355,6 +356,207 @@ describe('GDD generation', () => {
       status: 'refused'
     });
     expect(await readFile(destination, 'utf8')).toBe('user content');
+  });
+
+  it('rejects incomplete, unsupported, and unsafe manifests before using them', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const path = join(root, 'gdd/.gdd.json');
+    const valid = await readManifest(root);
+    if (!valid) throw new Error('Expected a generated manifest');
+
+    for (const replacement of [
+      { ...valid, hosts: ['agents', 'unknown'] },
+      { ...valid, hosts: ['agents', 'agents'] },
+      { ...valid, managedPaths: [...valid.managedPaths, '../outside.md'] },
+      { ...valid, managedPaths: [...valid.managedPaths, valid.managedPaths[0]] },
+      { ...valid, createdAt: '2026-09-10' },
+      { ...valid, generatorVersion: 'development' },
+      { ...valid, unexpected: true }
+    ]) {
+      await writeFile(path, `${JSON.stringify(replacement)}\n`);
+      await expect(readManifest(root)).rejects.toMatchObject({ code: 'invalid_manifest' });
+    }
+  });
+
+  it('surfaces filesystem failures rather than treating existing manifest state as missing', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const path = join(root, 'gdd/.gdd.json');
+    await rm(path);
+    await mkdir(path);
+
+    await expect(readManifest(root)).rejects.toMatchObject({ code: 'filesystem_error' });
+    await expect(init(root, ['agents'], false, '1.0.0')).rejects.toMatchObject({
+      code: 'filesystem_error'
+    });
+  });
+});
+
+describe('managed write transactions', () => {
+  it('preflights every target before replacing any owned file', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const unchangedPath = join(root, 'gdd/README.md');
+    const protectedPath = join(root, '.agents/skills/gdd-archive/SKILL.md');
+    const before = await readFile(unchangedPath, 'utf8');
+    const manifestBefore = await readFile(join(root, 'gdd/.gdd.json'), 'utf8');
+    await writeFile(protectedPath, 'user-owned content');
+
+    const actions = await update(root, '2.0.0');
+
+    expect(actions.find((action) => action.path.endsWith('gdd-archive/SKILL.md'))).toMatchObject({
+      status: 'refused'
+    });
+    expect(await readFile(unchangedPath, 'utf8')).toBe(before);
+    expect(await readFile(join(root, 'gdd/.gdd.json'), 'utf8')).toBe(manifestBefore);
+    expect(await readFile(protectedPath, 'utf8')).toBe('user-owned content');
+  });
+
+  it('refuses same-project readers and mutations while a live operation lease exists', async () => {
+    const root = await project();
+    const otherRoot = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const leasePath = join(root, 'gdd/.gdd-operation.lock/lease.json');
+    await mkdir(dirname(leasePath), { recursive: true });
+    const lease = `${JSON.stringify({
+      schemaVersion: 1,
+      operationId: 'live-operation',
+      command: 'update',
+      startedAt: '2026-09-10T12:00:00.000Z',
+      pid: process.pid
+    })}\n`;
+    await writeFile(leasePath, lease);
+
+    await expect(status(root)).rejects.toMatchObject({ code: 'operation_in_progress' });
+    await expect(update(root, '2.0.0')).rejects.toMatchObject({ code: 'operation_in_progress' });
+    expect(await readFile(leasePath, 'utf8')).toBe(lease);
+    await expect(init(otherRoot, ['github'], false, '2.0.0')).resolves.toHaveLength(11);
+  });
+
+  it('recovers every prepared managed-write boundary after taking over a stale lease', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const restoredWrites = await Promise.all(
+      ['gdd/README.md', '.agents/skills/gdd-build/SKILL.md'].map(async (path) => ({
+        path,
+        content: await readFile(join(root, path), 'utf8')
+      }))
+    );
+    const operationId = 'recovery-operation';
+    await Promise.all(
+      restoredWrites.map(({ path }) => writeFile(join(root, path), `incomplete ${path}`))
+    );
+    // This is the durable state left after the first target has committed and before the next.
+    const firstRestoredWrite = restoredWrites[0];
+    if (!firstRestoredWrite) throw new Error('Expected a managed write for recovery');
+    await writeFile(join(root, firstRestoredWrite.path), firstRestoredWrite.content);
+    await mkdir(join(root, `gdd/.gdd-managed-staging/${operationId}`), { recursive: true });
+    await Promise.all(
+      restoredWrites.map(({ content }, index) =>
+        writeFile(join(root, `gdd/.gdd-managed-staging/${operationId}/${index}.content`), content)
+      )
+    );
+    await writeFile(
+      join(root, 'gdd/.gdd-managed.pending.json'),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        operationId,
+        command: 'update',
+        createdAt: '2026-09-10T12:00:00.000Z',
+        phase: 'prepared',
+        writes: restoredWrites.map(({ path, content }, index) => ({
+          path,
+          stagedPath: `gdd/.gdd-managed-staging/${operationId}/${index}.content`,
+          sha256: createHash('sha256').update(content).digest('hex')
+        }))
+      })}\n`
+    );
+    const leasePath = join(root, 'gdd/.gdd-operation.lock/lease.json');
+    await mkdir(dirname(leasePath), { recursive: true });
+    await writeFile(
+      leasePath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        operationId,
+        command: 'update',
+        startedAt: '2026-09-10T12:00:00.000Z',
+        pid: 2147483647
+      })}\n`
+    );
+
+    await update(root, '1.0.0');
+
+    for (const { path, content } of restoredWrites) {
+      expect(await readFile(join(root, path), 'utf8')).toBe(content);
+    }
+    await expect(readFile(join(root, 'gdd/.gdd-managed.pending.json'), 'utf8')).rejects.toThrow();
+    await expect(
+      readFile(join(root, `gdd/.gdd-managed-staging/${operationId}/0.content`), 'utf8')
+    ).rejects.toThrow();
+    await expect(readFile(leasePath, 'utf8')).rejects.toThrow();
+    await expect(update(root, '1.0.0')).resolves.toBeDefined();
+  });
+
+  it('rolls back an incomplete staging phase and preserves unjournaled staging for repair', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const operationId = 'staging-operation';
+    const stagedPath = `gdd/.gdd-managed-staging/${operationId}/0.content`;
+    await mkdir(dirname(join(root, stagedPath)), { recursive: true });
+    await writeFile(join(root, stagedPath), 'incomplete staged content');
+    await writeFile(
+      join(root, 'gdd/.gdd-managed.pending.json'),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        operationId,
+        command: 'update',
+        createdAt: '2026-09-10T12:00:00.000Z',
+        phase: 'staging',
+        writes: [
+          {
+            path: 'gdd/README.md',
+            stagedPath,
+            sha256: createHash('sha256').update('incomplete staged content').digest('hex')
+          }
+        ]
+      })}\n`
+    );
+
+    await update(root, '1.0.0');
+
+    await expect(readFile(join(root, 'gdd/.gdd-managed.pending.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(root, stagedPath), 'utf8')).rejects.toThrow();
+    const orphanPath = join(root, 'gdd/.gdd-managed-staging/orphan/0.content');
+    await mkdir(dirname(orphanPath), { recursive: true });
+    await writeFile(orphanPath, 'must not be deleted without a journal');
+    await expect(update(root, '1.0.0')).rejects.toMatchObject({ code: 'operation_in_progress' });
+    expect(await readFile(orphanPath, 'utf8')).toBe('must not be deleted without a journal');
+  });
+
+  it('refuses archive while another operation owns the project lease', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    await writeCompleteIndexedChange(root, 'completed-change', 1);
+    const leasePath = join(root, 'gdd/.gdd-operation.lock/lease.json');
+    await mkdir(dirname(leasePath), { recursive: true });
+    await writeFile(
+      leasePath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        operationId: 'live-operation',
+        command: 'update',
+        startedAt: '2026-09-10T12:00:00.000Z',
+        pid: process.pid
+      })}\n`
+    );
+
+    await expect(archive(root, 'completed-change', true)).rejects.toMatchObject({
+      code: 'operation_in_progress'
+    });
+    expect(await readFile(join(root, 'gdd/changes/completed-change/change.md'), 'utf8')).toContain(
+      'completed-change'
+    );
   });
 });
 
