@@ -46,9 +46,9 @@ describe('GFT init banner', () => {
   it('introduces the GDD lifecycle before integration selection', () => {
     expect(gddInitIntroLines()).toEqual([
       'Welcome to GDD — a spec-driven development framework.',
-      'Turn an idea into evidence-backed delivery:',
-      'define change → design → build → validate → archive',
-      'Choose where to install GDD support:'
+      'Turn an idea into evidence-backed delivery',
+      '\nWorkflow:',
+      'define change → design → build → validate → archive'
     ]);
   });
 });

@@ -1,7 +1,9 @@
 type Cell = 0 | 1 | 2;
 
 const supportsUnicode =
-  process.platform !== 'win32' || Boolean(process.env.WT_SESSION) || Boolean(process.env.TERM_PROGRAM);
+  process.platform !== 'win32' ||
+  Boolean(process.env.WT_SESSION) ||
+  Boolean(process.env.TERM_PROGRAM);
 
 const CHARS = supportsUnicode
   ? { full: '██', dim: '░░', empty: '  ' }
@@ -133,7 +135,7 @@ export function gddInitIntroLines(): string[] {
     'Welcome to GDD — a spec-driven development framework.',
     'Turn an idea into evidence-backed delivery',
     '\nWorkflow:',
-    'define change → design → build → validate → archive',
+    'define change → design → build → validate → archive'
   ];
 }
 
@@ -141,7 +143,12 @@ export function canAnimateBanner(
   env: NodeJS.ProcessEnv = process.env,
   stdout: { isTTY?: boolean; columns?: number } = process.stdout
 ): boolean {
-  if (!stdout.isTTY || 'CI' in env || env.NO_COLOR !== undefined || env.GFT_SDD_NO_ANIMATION !== undefined)
+  if (
+    !stdout.isTTY ||
+    'CI' in env ||
+    env.NO_COLOR !== undefined ||
+    env.GFT_SDD_NO_ANIMATION !== undefined
+  )
     return false;
   return (stdout.columns ?? 80) >= 40;
 }
