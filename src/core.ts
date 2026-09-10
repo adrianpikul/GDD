@@ -2,14 +2,7 @@ import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { baseFiles, isManagedContent, renderHostFiles } from './templates.js';
-import type {
-  ChangeRecord,
-  ChangeState,
-  Host,
-  Manifest,
-  TaskRecord,
-  TaskSummary
-} from './types.js';
+import type { ChangeRecord, ChangeState, Host, Manifest, TaskMode, TaskSummary } from './types.js';
 
 export class GddError extends Error {}
 export type Action = {
@@ -163,14 +156,15 @@ export async function update(rootInput: string, version: string): Promise<Action
   const manifest = await readManifest(root);
   if (!manifest) throw new GddError('GDD is not initialized. Run gdd init first.');
   const files = filesFor(manifest.hosts, version);
-  const selected = Object.fromEntries(
-    manifest.managedPaths
-      .filter((path) => path !== manifestPath)
-      .map((path) => [path, files[path]])
-      .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
-  );
-  const actions = await writeManaged(root, selected, true);
-  await writeManifest(root, { ...manifest, generatorVersion: version, updatedAt: now() });
+  const actions = await writeManaged(root, files, true);
+  await writeManifest(root, {
+    ...manifest,
+    generatorVersion: version,
+    managedPaths: [
+      ...new Set([...manifest.managedPaths, ...Object.keys(files), manifestPath])
+    ].sort(),
+    updatedAt: now()
+  });
   return actions;
 }
 
@@ -217,7 +211,7 @@ function hasEvidence(text: string): boolean {
   return (
     Boolean(normalized) &&
     !/<[^>]+>/.test(normalized) &&
-    !/^(pending|todo|not run|tbd)\b/.test(normalized)
+    !/^(pending|todo|not run|untested|blocked|tbd)\b/.test(normalized)
   );
 }
 
@@ -227,6 +221,7 @@ function parseRecordMetadata(data: unknown): {
   state: ChangeState;
   updated: string;
   parent?: string;
+  taskMode?: TaskMode;
 } {
   if (!data || typeof data !== 'object') throw new GddError('frontmatter must be an object');
   const item = data as Record<string, unknown>;
@@ -237,18 +232,72 @@ function parseRecordMetadata(data: unknown): {
     typeof item.updated !== 'string'
   )
     throw new GddError('invalid required frontmatter fields');
+  if (item.taskMode !== undefined && item.taskMode !== 'decomposed' && item.taskMode !== 'direct') {
+    throw new GddError('taskMode must be decomposed or direct when present');
+  }
   return {
     id: item.id,
     title: item.title,
     state: item.state,
     updated: item.updated,
-    ...(typeof item.parent === 'string' ? { parent: item.parent } : {})
+    ...(typeof item.parent === 'string' ? { parent: item.parent } : {}),
+    ...(item.taskMode === 'decomposed' || item.taskMode === 'direct'
+      ? { taskMode: item.taskMode }
+      : {})
   };
 }
 
-function parseTask(path: string, root: string, text: string): TaskRecord {
-  const metadata = parseRecordMetadata(frontmatter(text));
-  const rawDependencies = (frontmatter(text) as Record<string, unknown>).dependsOn;
+type TaskFormat = 'canonical' | 'shape';
+type ParsedTask = {
+  path: string;
+  id: string;
+  title: string;
+  state?: ChangeState;
+  dependsOn: string[];
+  next: string;
+  evidence: string;
+  format: TaskFormat;
+};
+type TaskIndexEntry = {
+  id: string;
+  completed: boolean;
+  path: string;
+  format: TaskFormat;
+};
+
+function shapeTaskId(tasksDirectory: string, path: string): string {
+  const taskPath = relative(tasksDirectory, path);
+  if (!taskPath || taskPath.startsWith(`..${sep}`) || taskPath === '..') {
+    throw new GddError(`task path escapes tasks directory: ${path}`);
+  }
+  if (!taskPath.endsWith('.md')) throw new GddError(`task record is not Markdown: ${taskPath}`);
+  return taskPath.slice(0, -'.md'.length).split(sep).join('/');
+}
+
+function parseCanonicalTask(
+  path: string,
+  root: string,
+  text: string,
+  requireState: boolean
+): ParsedTask {
+  const raw = frontmatter(text);
+  if (!raw || typeof raw !== 'object') throw new GddError('frontmatter must be an object');
+  const item = raw as Record<string, unknown>;
+  if (
+    typeof item.id !== 'string' ||
+    typeof item.title !== 'string' ||
+    typeof item.updated !== 'string'
+  ) {
+    throw new GddError('invalid required task frontmatter fields');
+  }
+  const state = item.state;
+  if (requireState && state !== 'open' && state !== 'verified') {
+    throw new GddError('legacy task requires state: open or verified');
+  }
+  if (state !== undefined && state !== 'open' && state !== 'verified') {
+    throw new GddError('task state must be open or verified when present');
+  }
+  const rawDependencies = item.dependsOn;
   if (
     !Array.isArray(rawDependencies) ||
     rawDependencies.some((dependency) => typeof dependency !== 'string')
@@ -259,10 +308,96 @@ function parseTask(path: string, root: string, text: string): TaskRecord {
   section(text, '## Acceptance and check');
   const evidence = section(text, '## Evidence');
   const next = section(text, '## Next');
-  if (metadata.state === 'verified' && !hasEvidence(evidence)) {
-    throw new GddError('verified task requires substantive ## Evidence');
+  return {
+    path: relative(root, path),
+    id: item.id,
+    title: item.title,
+    ...(state === 'open' || state === 'verified' ? { state } : {}),
+    dependsOn: rawDependencies,
+    next,
+    evidence,
+    format: 'canonical'
+  };
+}
+
+function parseShapeTask(
+  path: string,
+  root: string,
+  tasksDirectory: string,
+  text: string
+): ParsedTask {
+  const titleMatch = /^# Task:\s*(.+?)\s*$/m.exec(text);
+  const title = titleMatch?.[1]?.trim();
+  if (!title) throw new GddError('unsupported task record format');
+  section(text, '## Outcome');
+  section(text, '## Dependencies');
+  section(text, '## Check');
+  const evidence = section(text, '## Evidence');
+  const next = section(text, '## Next');
+  return {
+    path: relative(root, path),
+    id: shapeTaskId(tasksDirectory, path),
+    title,
+    dependsOn: [],
+    next,
+    evidence,
+    format: 'shape'
+  };
+}
+
+function parseTask(
+  path: string,
+  root: string,
+  tasksDirectory: string,
+  text: string,
+  requireState: boolean
+): ParsedTask {
+  if (/^---\s*\n/.test(text)) return parseCanonicalTask(path, root, text, requireState);
+  if (requireState) return parseCanonicalTask(path, root, text, requireState);
+  return parseShapeTask(path, root, tasksDirectory, text);
+}
+
+async function parseTaskIndex(
+  root: string,
+  indexPath: string,
+  tasksDirectory: string,
+  text: string
+): Promise<TaskIndexEntry[]> {
+  const entries: TaskIndexEntry[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.trimStart().startsWith('- [')) continue;
+    const canonical =
+      /^\s*-\s+\[([ xX])\]\s+([A-Za-z0-9][A-Za-z0-9_-]*)\s+.+?\s+—\s+\[[^\]]+\]\(([^)]+)\)\s*$/.exec(
+        line
+      );
+    const shape = /^\s*-\s+\[([ xX])\]\s+\[[^\]]+\]\(([^)]+)\)\s*$/.exec(line);
+    const match = canonical ?? shape;
+    if (!match?.[1] || !match[2]) {
+      throw new GddError('malformed task checkbox entry');
+    }
+    const link = canonical ? canonical[3] : shape?.[2];
+    if (!link) throw new GddError('malformed task checkbox entry');
+    const target = resolve(dirname(indexPath), link);
+    if (!isInside(tasksDirectory, target)) {
+      throw new GddError(`task link escapes tasks directory: ${link}`);
+    }
+    await assertSafePath(root, relative(root, target));
+    const id = canonical?.[2] ?? shapeTaskId(tasksDirectory, target);
+    if (entries.some((entry) => entry.id === id)) {
+      throw new GddError(`duplicate task ID in tasks.md: ${id}`);
+    }
+    if (entries.some((entry) => entry.path === target)) {
+      throw new GddError(`duplicate task link in tasks.md: ${link}`);
+    }
+    entries.push({
+      id,
+      completed: match[1].toLowerCase() === 'x',
+      path: target,
+      format: canonical ? 'canonical' : 'shape'
+    });
   }
-  return { path: relative(root, path), ...metadata, dependsOn: rawDependencies, next };
+  if (!entries.length) throw new GddError('tasks.md contains no task checkbox entries');
+  return entries;
 }
 
 export async function status(
@@ -284,11 +419,25 @@ export async function status(
     try {
       const text = await readFile(path, 'utf8');
       const metadata = parseRecordMetadata(frontmatter(text));
-      const taskPaths = await findMarkdownFiles(resolve(dirname(path), 'tasks'), true);
-      const tasks: TaskRecord[] = [];
+      const changeDirectory = dirname(path);
+      const tasksDirectory = resolve(changeDirectory, 'tasks');
+      const taskPaths = await findMarkdownFiles(tasksDirectory, true);
+      const indexPath = resolve(changeDirectory, 'tasks.md');
+      const hasIndex = await exists(indexPath);
+      if (hasIndex) await assertSafePath(root, relative(root, indexPath));
+      const planPath = resolve(changeDirectory, 'plan.md');
+      const hasPlan = await exists(planPath);
+      if (hasPlan) await assertSafePath(root, relative(root, planPath));
+      const tasks: ParsedTask[] = [];
       for (const taskPath of taskPaths) {
         try {
-          const task = parseTask(taskPath, root, await readFile(taskPath, 'utf8'));
+          const task = parseTask(
+            taskPath,
+            root,
+            tasksDirectory,
+            await readFile(taskPath, 'utf8'),
+            !hasIndex
+          );
           if (tasks.some((existing) => existing.id === task.id)) {
             addTaskError(taskPath, `duplicate task ID: ${task.id}`);
           } else {
@@ -299,30 +448,98 @@ export async function status(
         }
       }
       const taskIds = new Map(tasks.map((task) => [task.id, task]));
-      for (const task of tasks) {
-        for (const dependency of task.dependsOn) {
-          const dependedOn = taskIds.get(dependency);
-          if (!dependedOn)
-            addTaskError(resolve(root, task.path), `unknown dependency: ${dependency}`);
-          else if (task.state === 'verified' && dependedOn.state !== 'verified') {
+      let taskSummary: TaskSummary;
+      const parentIssues: string[] = [];
+      let hasValidTaskIndex = false;
+      if (hasIndex) {
+        let entries: TaskIndexEntry[] = [];
+        try {
+          entries = await parseTaskIndex(
+            root,
+            indexPath,
+            tasksDirectory,
+            await readFile(indexPath, 'utf8')
+          );
+          hasValidTaskIndex = true;
+        } catch (error) {
+          addTaskError(indexPath, error instanceof Error ? error.message : String(error));
+        }
+        const tasksByPath = new Map(tasks.map((task) => [resolve(root, task.path), task]));
+        const indexedPaths = new Set<string>();
+        const completedIds = new Set(
+          entries.filter((entry) => entry.completed).map((entry) => entry.id)
+        );
+        for (const entry of entries) {
+          indexedPaths.add(entry.path);
+          const task = tasksByPath.get(entry.path);
+          if (!task) {
+            addTaskError(
+              indexPath,
+              `linked task file is missing or invalid: ${relative(changeDirectory, entry.path)}`
+            );
+            continue;
+          }
+          if (task.id !== entry.id) {
+            addTaskError(entry.path, `checkbox ID ${entry.id} does not match task ID ${task.id}`);
+          }
+          if (entry.completed && !hasEvidence(task.evidence)) {
+            addTaskError(entry.path, 'checked task requires substantive ## Evidence');
+          }
+          if (task.format === 'canonical') {
+            for (const dependency of task.dependsOn) {
+              if (!taskIds.has(dependency))
+                addTaskError(entry.path, `unknown dependency: ${dependency}`);
+              else if (entry.completed && !completedIds.has(dependency)) {
+                addTaskError(entry.path, `checked task depends on unchecked task: ${dependency}`);
+              }
+            }
+          }
+        }
+        for (const task of tasks) {
+          const absolutePath = resolve(root, task.path);
+          if (!indexedPaths.has(absolutePath))
+            addTaskError(absolutePath, `task is not indexed in tasks.md: ${task.id}`);
+        }
+        taskSummary = {
+          total: entries.length,
+          open: entries.filter((entry) => !entry.completed).length,
+          completed: entries.filter((entry) => entry.completed).length,
+          invalid: taskErrors.size
+        };
+      } else {
+        for (const task of tasks) {
+          for (const dependency of task.dependsOn) {
+            const dependedOn = taskIds.get(dependency);
+            if (!dependedOn)
+              addTaskError(resolve(root, task.path), `unknown dependency: ${dependency}`);
+            else if (task.state === 'verified' && dependedOn.state !== 'verified') {
+              addTaskError(
+                resolve(root, task.path),
+                `verified task depends on open task: ${dependency}`
+              );
+            }
+          }
+          if (task.state === 'verified' && !hasEvidence(task.evidence)) {
             addTaskError(
               resolve(root, task.path),
-              `verified task depends on open task: ${dependency}`
+              'verified task requires substantive ## Evidence'
             );
           }
         }
+        taskSummary = {
+          total: taskPaths.length,
+          open: tasks.filter((task) => task.state === 'open').length,
+          completed: tasks.filter((task) => task.state === 'verified').length,
+          invalid: taskErrors.size
+        };
       }
-      for (const [taskPath, errors] of taskErrors) {
-        invalid.push({ path: relative(root, taskPath), error: errors.join('; ') });
+      if (metadata.taskMode === 'decomposed' && !hasValidTaskIndex) {
+        parentIssues.push('decomposed change requires a readable nonempty tasks.md');
       }
-      const taskSummary: TaskSummary = {
-        total: taskPaths.length,
-        open: tasks.filter((task) => task.state === 'open').length,
-        verified: tasks.filter((task) => task.state === 'verified').length,
-        invalid: taskErrors.size
-      };
-      const parentIssues: string[] = [];
-      if (taskPaths.length) {
+      if (metadata.taskMode === 'direct' && hasPlan) {
+        parentIssues.push('direct change cannot include plan.md; use taskMode: decomposed');
+      }
+      if (!hasIndex && taskPaths.length) {
         let workCoverage = '';
         try {
           workCoverage = section(text, '## Work');
@@ -344,6 +561,9 @@ export async function status(
         } catch (error) {
           parentIssues.push(error instanceof Error ? error.message : String(error));
         }
+      }
+      for (const [taskPath, errors] of taskErrors) {
+        invalid.push({ path: relative(root, taskPath), error: errors.join('; ') });
       }
       if (parentIssues.length)
         invalid.push({ path: relative(root, path), error: parentIssues.join('; ') });
@@ -377,7 +597,7 @@ export function formatStatus(records: ChangeRecord[]): string {
     ? records
         .map(
           (record) =>
-            `${record.state.padEnd(8)} ${record.id} — ${record.title}\n  tasks: ${record.tasks.verified}/${record.tasks.total} verified${record.tasks.invalid ? `; ${record.tasks.invalid} invalid` : ''}\n  updated ${record.updated}\n  next: ${record.next}`
+            `${record.state.padEnd(8)} ${record.id} — ${record.title}\n  tasks: ${record.tasks.completed}/${record.tasks.total} complete${record.tasks.invalid ? `; ${record.tasks.invalid} invalid` : ''}\n  updated ${record.updated}\n  next: ${record.next}`
         )
         .join('\n')
     : 'No GDD changes found.';
