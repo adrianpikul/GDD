@@ -1,5 +1,4 @@
 .agents
-openspec
 node_modules/
 dist/
 coverage/
