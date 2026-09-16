@@ -7,13 +7,19 @@ import {
   squareStartCol
 } from '../src/gft-banner.js';
 
-describe('GFT init banner', () => {
-  it('renders five rows with a filled square on the right', () => {
+describe('GDD init banner', () => {
+  it('renders the GDD wordmark with a filled square on the right', () => {
     const lines = finalGftBannerLines(false);
     const cell = lines[0]?.includes('██') ? '██' : '##';
     const squareWidth = cell.length * 3;
 
-    expect(lines).toHaveLength(5);
+    expect(lines).toEqual([
+      `${cell.repeat(4)}  ${cell.repeat(2)}    ${cell.repeat(2)}    ${cell.repeat(3)}`,
+      `${cell}        ${cell}  ${cell}  ${cell}  ${cell}  ${cell.repeat(3)}`,
+      `${cell}  ${cell.repeat(2)}  ${cell}  ${cell}  ${cell}  ${cell}  ${cell.repeat(3)}`,
+      `${cell}    ${cell}  ${cell}  ${cell}  ${cell}  ${cell}  ${cell.repeat(3)}`,
+      `${cell.repeat(4)}  ${cell.repeat(2)}    ${cell.repeat(2)}    ${cell.repeat(3)}`
+    ]);
     for (const line of lines) expect(line.slice(-squareWidth)).toBe(cell.repeat(3));
     expect(squareStartCol()).toBeGreaterThan(0);
   });
@@ -23,6 +29,7 @@ describe('GFT init banner', () => {
     const full = frames.at(-1);
     const dimSquare = frames.at(-2);
     const beforeSquare = frames.at(-3);
+    const staticBanner = finalGftBannerLines(false);
     const cell = full?.[0]?.includes('██') ? '██' : '##';
     const dimCell = cell === '██' ? '░░' : '++';
     const squareWidth = cell.length * 3;
@@ -30,6 +37,7 @@ describe('GFT init banner', () => {
     expect(full?.[0]?.slice(-squareWidth)).toBe(cell.repeat(3));
     expect(dimSquare?.[0]?.slice(-squareWidth)).toBe(dimCell.repeat(3));
     expect(beforeSquare?.[0]?.slice(-squareWidth)).toBe(' '.repeat(squareWidth));
+    expect(full).toEqual(staticBanner);
   });
 
   it('only animates in supported terminals', () => {

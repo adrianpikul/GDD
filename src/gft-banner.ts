@@ -24,20 +24,12 @@ const G: boolean[][] = [
   [true, true, true, true]
 ];
 
-const F: boolean[][] = [
-  [true, true, true],
-  [true, false, false],
+const D: boolean[][] = [
   [true, true, false],
-  [true, false, false],
-  [true, false, false]
-];
-
-const T: boolean[][] = [
-  [true, true, true],
-  [false, true, false],
-  [false, true, false],
-  [false, true, false],
-  [false, true, false]
+  [true, false, true],
+  [true, false, true],
+  [true, false, true],
+  [true, true, false]
 ];
 
 const SQUARE: boolean[][] = [
@@ -60,16 +52,26 @@ function concatGlyphs(glyphs: Cell[][][]): Cell[][] {
 }
 
 export function squareStartCol(): number {
-  return (G[0]?.length ?? 0) + 1 + (F[0]?.length ?? 0) + 1 + (T[0]?.length ?? 0) + 1;
+  return (G[0]?.length ?? 0) + 1 + (D[0]?.length ?? 0) + 1 + (D[0]?.length ?? 0) + 1;
 }
 
-function paintGrid({ g, f, t, square }: { g: Cell; f: Cell; t: Cell; square: Cell }): Cell[][] {
+function paintGrid({
+  g,
+  firstD,
+  secondD,
+  square
+}: {
+  g: Cell;
+  firstD: Cell;
+  secondD: Cell;
+  square: Cell;
+}): Cell[][] {
   return concatGlyphs([
     maskToCells(G, g),
     GAP,
-    maskToCells(F, f),
+    maskToCells(D, firstD),
     GAP,
-    maskToCells(T, t),
+    maskToCells(D, secondD),
     GAP,
     maskToCells(SQUARE, square)
   ]);
@@ -105,29 +107,29 @@ export function renderBannerGrid(grid: Cell[][], colored: boolean): string[] {
 }
 
 function paintFrame(
-  values: { g: Cell; f: Cell; t: Cell; square: Cell },
+  values: { g: Cell; firstD: Cell; secondD: Cell; square: Cell },
   colored: boolean
 ): string[] {
   return renderBannerGrid(paintGrid(values), colored);
 }
 
 export function buildGftBannerFrames(colored = false): string[][] {
-  const steps: Array<{ g: Cell; f: Cell; t: Cell; square: Cell }> = [
-    { g: 0, f: 0, t: 0, square: 0 },
-    { g: 1, f: 0, t: 0, square: 0 },
-    { g: 2, f: 0, t: 0, square: 0 },
-    { g: 2, f: 1, t: 0, square: 0 },
-    { g: 2, f: 2, t: 0, square: 0 },
-    { g: 2, f: 2, t: 1, square: 0 },
-    { g: 2, f: 2, t: 2, square: 0 },
-    { g: 2, f: 2, t: 2, square: 1 },
-    { g: 2, f: 2, t: 2, square: 2 }
+  const steps: Array<{ g: Cell; firstD: Cell; secondD: Cell; square: Cell }> = [
+    { g: 0, firstD: 0, secondD: 0, square: 0 },
+    { g: 1, firstD: 0, secondD: 0, square: 0 },
+    { g: 2, firstD: 0, secondD: 0, square: 0 },
+    { g: 2, firstD: 1, secondD: 0, square: 0 },
+    { g: 2, firstD: 2, secondD: 0, square: 0 },
+    { g: 2, firstD: 2, secondD: 1, square: 0 },
+    { g: 2, firstD: 2, secondD: 2, square: 0 },
+    { g: 2, firstD: 2, secondD: 2, square: 1 },
+    { g: 2, firstD: 2, secondD: 2, square: 2 }
   ];
   return steps.map((step) => paintFrame(step, colored));
 }
 
 export function finalGftBannerLines(colored = false): string[] {
-  return paintFrame({ g: 2, f: 2, t: 2, square: 2 }, colored);
+  return paintFrame({ g: 2, firstD: 2, secondD: 2, square: 2 }, colored);
 }
 
 export function gddInitIntroLines(): string[] {
