@@ -51,6 +51,12 @@ export function isInside(root: string, target: string): boolean {
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel));
 }
 
+// Status paths are part of the CLI/API contract, so keep them stable across
+// operating systems even though node:path.relative uses the host separator.
+function projectRelativePath(root: string, target: string): string {
+  return relative(root, target).split(sep).join('/');
+}
+
 const emptyArchiveSummary = (): ArchiveSummary => ({ changes: 0, tasks: 0 });
 
 type ArchiveState = {
@@ -419,10 +425,12 @@ function issueBelongsToChange(issuePath: string, slug: string): boolean {
   return issuePath === `${directory}/change.md` || issuePath.startsWith(`${directory}/`);
 }
 
-async function eligibleArchiveRecord(root: string, slug: string): Promise<ChangeRecord> {
+async function archiveTaskCount(root: string, slug: string, force: boolean): Promise<number> {
   const changePath = await assertSafePath(root, archiveChangePath(slug));
   if (!(await exists(changePath))) throw new GddError(`GDD change not found: ${slug}`);
   await assertSafeDirectoryTree(root, changePath);
+  if (force) return (await findMarkdownFiles(resolve(changePath, 'tasks'), true)).length;
+
   const result = await status(root);
   const record = result.records.find(
     (candidate) => candidate.path === `${archiveChangePath(slug)}/change.md`
@@ -434,19 +442,20 @@ async function eligibleArchiveRecord(root: string, slug: string): Promise<Change
   if (issues.length || record.tasks.open || record.tasks.invalid) {
     throw new GddError(`GDD change must be complete and valid before archiving: ${slug}`);
   }
-  return record;
+  return record.tasks.total;
 }
 
 export async function archive(
   rootInput: string,
   slug: string,
-  confirmed: boolean
+  confirmed: boolean,
+  force = false
 ): Promise<ArchiveSummary> {
   if (!confirmed) throw new GddError('Archiving requires explicit confirmation.');
   if (!isArchiveSlug(slug)) throw new GddError('Archive slug must be a kebab-case change ID.');
   const root = normalizeRoot(rootInput);
   await recoverArchive(root);
-  const record = await eligibleArchiveRecord(root, slug);
+  const taskCount = await archiveTaskCount(root, slug, force);
   const sourceRelativePath = archiveChangePath(slug);
   const stagedRelativePath = archiveStagedPath(slug);
   const sourcePath = await assertSafePath(root, sourceRelativePath);
@@ -457,7 +466,7 @@ export async function archive(
     schemaVersion: 1,
     operationId: randomUUID(),
     slug,
-    tasks: record.tasks.total,
+    tasks: taskCount,
     archivedAt: now()
   };
   await writeArchiveJournal(root, journal);
@@ -732,7 +741,7 @@ function parseCanonicalTask(
   const evidence = section(text, '## Evidence');
   const next = section(text, '## Next');
   return {
-    path: relative(root, path),
+    path: projectRelativePath(root, path),
     id: item.id,
     title: item.title,
     ...(state === 'open' || state === 'verified' ? { state } : {}),
@@ -758,7 +767,7 @@ function parseShapeTask(
   const evidence = section(text, '## Evidence');
   const next = section(text, '## Next');
   return {
-    path: relative(root, path),
+    path: projectRelativePath(root, path),
     id: shapeTaskId(tasksDirectory, path),
     title,
     dependsOn: [],
@@ -1002,12 +1011,12 @@ export async function status(rootInput: string, state?: ChangeState): Promise<St
         }
       }
       for (const [taskPath, errors] of taskErrors) {
-        invalid.push({ path: relative(root, taskPath), error: errors.join('; ') });
+        invalid.push({ path: projectRelativePath(root, taskPath), error: errors.join('; ') });
       }
       if (parentIssues.length)
-        invalid.push({ path: relative(root, path), error: parentIssues.join('; ') });
+        invalid.push({ path: projectRelativePath(root, path), error: parentIssues.join('; ') });
       const record: ChangeRecord = {
-        path: relative(root, path),
+        path: projectRelativePath(root, path),
         ...metadata,
         next: section(text, '## Next'),
         tasks: taskSummary
@@ -1015,7 +1024,7 @@ export async function status(rootInput: string, state?: ChangeState): Promise<St
       if (!state || record.state === state) records.push(record);
     } catch (error) {
       invalid.push({
-        path: relative(root, path),
+        path: projectRelativePath(root, path),
         error: error instanceof Error ? error.message : String(error)
       });
     }

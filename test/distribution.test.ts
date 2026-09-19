@@ -109,11 +109,26 @@ describe.sequential('built CLI distribution', () => {
       '--yes'
     ]);
     expect(archived.stdout).toContain('Archived completed-change.');
+    const forcedChangeDirectory = join(project, 'gdd/changes/open-change');
+    await mkdir(forcedChangeDirectory, { recursive: true });
+    await writeFile(
+      join(forcedChangeDirectory, 'change.md'),
+      '---\nid: open-change\ntitle: Open change\nstate: open\nupdated: 2026-09-10T12:00:00Z\ntaskMode: direct\n---\n\n# Intent\n\n## Next\n\nDo not archive without force.\n'
+    );
+    const forced = await run(process.execPath, [
+      linkedBinary,
+      'archive',
+      'open-change',
+      project,
+      '--force',
+      '--yes'
+    ]);
+    expect(forced.stdout).toContain('Archived open-change.');
     const status = await run(process.execPath, [linkedBinary, 'status', project, '--json']);
     expect(JSON.parse(status.stdout)).toMatchObject({
       records: [],
       invalid: [],
-      archive: { changes: 1, tasks: 0 }
+      archive: { changes: 2, tasks: 0 }
     });
   });
 

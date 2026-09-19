@@ -801,6 +801,25 @@ describe('archive', () => {
     expect((await status(root)).archive).toEqual({ changes: 0, tasks: 0 });
   });
 
+  it('force archives a selected change with validation issues while preserving path safety', async () => {
+    const root = await project();
+    await init(root, ['agents'], false, '1.0.0');
+    const changeDirectory = join(root, 'gdd/changes/broken-change');
+    await mkdir(join(changeDirectory, 'tasks'), { recursive: true });
+    await writeFile(join(changeDirectory, 'change.md'), 'This record is intentionally malformed.\n');
+    await writeFile(join(changeDirectory, 'tasks/reconcile.md'), '# Incomplete task\n');
+
+    await expect(archive(root, 'broken-change', false, true)).rejects.toThrow(
+      'explicit confirmation'
+    );
+    await expect(archive(root, 'broken-change', true)).rejects.toThrow('GDD change not found');
+
+    const totals = await archive(root, 'broken-change', true, true);
+
+    expect(totals).toMatchObject({ changes: 1, tasks: 1 });
+    await expect(readFile(join(changeDirectory, 'change.md'), 'utf8')).rejects.toThrow();
+  });
+
   it('recovers a staged archive exactly once and reports malformed aggregate state', async () => {
     const root = await project();
     await init(root, ['agents'], false, '1.0.0');

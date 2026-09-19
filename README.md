@@ -79,6 +79,7 @@ For new records, `tasks.md` is the source of truth for completion. A task is che
 | `gdd status [path]`                     | Show change state, task progress, next actions, invalid records, and archive totals.                       |
 | `gdd status [path] --state open --json` | Filter to open changes and emit machine-readable status. Valid states are `open` and `verified`.           |
 | `gdd archive <slug> [path] --yes`       | Permanently remove one verified, valid change and update aggregate archive totals.                         |
+| `gdd archive <slug> [path] --force --yes` | Permanently remove the selected change despite GDD validation issues; retains path-safety checks.         |
 
 Use `gdd --help` or `gdd <command> --help` for the executable's current command help.
 
@@ -91,7 +92,7 @@ Use `gdd --help` or `gdd <command> --help` for the executable's current command 
 - Design and Design Update plan; they do not implement source changes.
 - Build delivers authorized work and records real check results.
 - Check verifies without changing requirements.
-- Archive requires explicit confirmation and deletes only a verified, valid GDD record.
+- Archive requires explicit confirmation and normally deletes only a verified, valid GDD record. `--force` is an explicit override for validation issues.
 
 ### GitHub Copilot prompt files
 
@@ -102,7 +103,7 @@ Use `gdd --help` or `gdd <command> --help` for the executable's current command 
 - GDD only updates files that carry its managed marker. It refuses to overwrite an unmanaged file at the same path, even with `--force`.
 - `update` refreshes managed templates and integration assets. Review local GDD-managed customizations before running it because they may be replaced by the current generator version.
 - `status` exits with a nonzero code when it finds malformed records, making it suitable for a CI quality gate.
-- `archive` requires a verified, structurally valid record with all tasks complete. In a non-interactive environment, it additionally requires `--yes`.
+- `archive` requires a verified, structurally valid record with all tasks complete. `--force` bypasses those validation checks for the selected change, but still requires confirmation (and `--yes` in a non-interactive environment), a safe kebab-case slug, and a regular non-symlink directory tree.
 - Archiving removes the selected `gdd/changes/<slug>/` directory. It retains aggregate counts only, not a per-change history; keep project history in Git.
 
 ## Team rollout

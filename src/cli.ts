@@ -88,13 +88,16 @@ program
   .command('archive <slug> [path]')
   .description('Archive one verified GDD change and retain aggregate completion totals.')
   .option('--yes', 'acknowledge irreversible deletion without an interactive prompt')
-  .action(async (slug: string, path = '.', flags: { yes?: boolean }) => {
+  .option('--force', 'archive despite GDD validation issues for the selected change')
+  .action(async (slug: string, path = '.', flags: { yes?: boolean; force?: boolean }) => {
     if (!flags.yes) {
       if (!process.stdin.isTTY) {
         throw new GddError('Archiving requires --yes when not running interactively.');
       }
       const confirmed = await confirm({
-        message: `Archive verified change "${slug}"? Its GDD records will be removed.`,
+        message: flags.force
+          ? `Force archive change "${slug}" despite validation issues? Its GDD records will be removed.`
+          : `Archive verified change "${slug}"? Its GDD records will be removed.`,
         default: false
       });
       if (!confirmed) {
@@ -102,7 +105,7 @@ program
         return;
       }
     }
-    const totals = await archive(path, slug, true);
+    const totals = await archive(path, slug, true, Boolean(flags.force));
     console.log(
       `Archived ${slug}. Totals: ${totals.changes} archived change${totals.changes === 1 ? '' : 's'} · ${totals.tasks} archived task${totals.tasks === 1 ? '' : 's'}.`
     );
